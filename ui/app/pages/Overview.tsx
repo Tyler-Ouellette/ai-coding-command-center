@@ -12,6 +12,7 @@ import { Button } from "@dynatrace/strato-components/buttons";
 import {
   ChatIcon,
   ClockIcon,
+  CodeIcon,
   CriticalIcon,
   DatabaseIcon,
   DocumentIcon,
@@ -34,6 +35,7 @@ import { Section } from "../components/Section";
 import { QueryState, type DqlResultLike } from "../components/QueryState";
 import { toneColor, subduedText, surfaceStyle } from "../components/tokens";
 import type { IconType, Tone } from "../data/taskKind";
+import { toolIcon } from "../data/taskKind";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
 import {
@@ -50,6 +52,8 @@ import {
   toolFailureDetailQuery,
   llmRetryQuery,
   llmRetryDetailQuery,
+  toolUsageQuery,
+  skillLogsQuery,
 } from "../data/queries";
 
 export const Overview = () => {
@@ -66,6 +70,8 @@ export const Overview = () => {
   const toolFailureDetail = useTimeframedDql(toolFailureDetailQuery());
   const llmRetry = useTimeframedDql(llmRetryQuery());
   const llmRetryDetail = useTimeframedDql(llmRetryDetailQuery());
+  const toolUsage = useTimeframedDql(toolUsageQuery());
+  const skillLogs = useTimeframedDql(skillLogsQuery());
 
   return (
     <Flex flexDirection="column" gap={20} padding={24} style={{ maxWidth: 1400, margin: "0 auto" }}>
@@ -113,6 +119,15 @@ export const Overview = () => {
           llmRetry={llmRetry}
           llmRetryDetail={llmRetryDetail}
         />
+      </Section>
+
+      {/* Top skills & tools */}
+      <Section
+        title="Top skills & tools"
+        subtitle="What your developers reach for most."
+        actions={<Link to="/tools" style={{ color: toneColor("primary"), fontSize: 13, textDecoration: "none" }}>View all →</Link>}
+      >
+        <TopSkillsTools toolUsage={toolUsage} skillLogs={skillLogs} />
       </Section>
 
       {/* Trends */}
@@ -229,6 +244,59 @@ function AttentionList({ sessions }: { sessions: Array<Record<string, unknown>> 
           </Flex>
         </Link>
       ))}
+    </Flex>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/** Compact top-5 skills and top-5 tools, side by side, linking to the full tab. */
+function TopSkillsTools({ toolUsage, skillLogs }: { toolUsage: DqlResultLike; skillLogs: DqlResultLike }) {
+  const tools = rows(toolUsage)
+    .map((r) => ({ name: String(r.tool ?? ""), calls: num(r.calls), Icon: toolIcon(String(r.tool ?? "")) }))
+    .filter((t) => t.name)
+    .slice(0, 5);
+
+  const skillCounts = new Map<string, number>();
+  for (const r of rows(skillLogs)) {
+    let skill: string | null = null;
+    try {
+      const p = JSON.parse(String(r.toolInput));
+      const s = p?.skill ?? p?.skill_name ?? p?.name;
+      skill = typeof s === "string" && s ? s : null;
+    } catch {
+      /* not JSON */
+    }
+    if (skill) skillCounts.set(skill, (skillCounts.get(skill) ?? 0) + 1);
+  }
+  const skills = [...skillCounts.entries()]
+    .map(([name, calls]) => ({ name, calls, Icon: CodeIcon as IconType }))
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 5);
+
+  const col = (heading: string, items: Array<{ name: string; calls: number; Icon: IconType }>, empty: string) => (
+    <Flex flexDirection="column" gap={4} style={{ flex: "1 1 320px" }}>
+      <Text style={{ fontSize: 11, color: subduedText, fontWeight: 600 }}>{heading.toUpperCase()}</Text>
+      {items.length === 0 ? (
+        <Text style={{ color: subduedText, fontSize: 12 }}>{empty}</Text>
+      ) : (
+        items.map((it) => (
+          <Link key={it.name} to="/tools" style={{ textDecoration: "none", color: "inherit" }}>
+            <Flex alignItems="center" gap={8} padding={6} style={{ borderRadius: 4, cursor: "pointer" }}>
+              <span style={{ color: subduedText, display: "flex" }}><it.Icon size={16} /></span>
+              <Text style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</Text>
+              <Text style={{ color: subduedText, fontSize: 12 }}>{fmtInt(it.calls)}</Text>
+            </Flex>
+          </Link>
+        ))
+      )}
+    </Flex>
+  );
+
+  return (
+    <Flex gap={24} flexFlow="wrap">
+      {col("Skills", skills, "No skill invocations in this timeframe.")}
+      {col("Tools", tools, "No tool calls in this timeframe.")}
     </Flex>
   );
 }

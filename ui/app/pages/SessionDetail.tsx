@@ -133,6 +133,54 @@ const HIGHLIGHT_MATCHERS: Record<string, (s: Span) => boolean> = {
   shadow: (s) => String(s.genOp) === "chat" || String(s.name) === "claude_code.llm_request",
 };
 
+/** Parse a span's captured arguments (span field or correlated tool_result log). */
+function parsedArgs(span: Span, logInput?: string): Record<string, unknown> | null {
+  const raw = span.args ?? logInput;
+  if (raw == null || raw === "") return null;
+  try {
+    const p = JSON.parse(String(raw));
+    if (p && typeof p === "object" && !Array.isArray(p)) return p as Record<string, unknown>;
+  } catch {
+    /* not JSON */
+  }
+  return null;
+}
+
+/** The invoked skill name for a `Skill` span, else null. */
+function skillNameOf(span: Span, logInput?: string): string | null {
+  if (String(span.tool ?? "").toLowerCase() !== "skill") return null;
+  const p = parsedArgs(span, logInput);
+  const skill = p?.skill ?? p?.skill_name ?? p?.name;
+  return typeof skill === "string" && skill ? skill : null;
+}
+
+/** Normalized tool name for a span (matches the aggregation in queries.ts). */
+function toolNameOf(span: Span): string {
+  const k = classifySpan({ name: span.name as string, tool: span.tool as string, genOp: span.genOp as string });
+  return k.kind === "tool" ? k.label : String(span.tool ?? "");
+}
+
+/** Resolve a `?highlight=` value to a span matcher. Supports the fixed security
+ *  keys plus parameterized `skill:<name>` / `tool:<name>` deep-links. */
+function resolveHighlightMatcher(
+  key: string,
+  inputByToolUse: Map<string, string>,
+): ((s: Span) => boolean) | null {
+  if (key.startsWith("skill:")) {
+    const want = key.slice(6).toLowerCase();
+    return (s) => {
+      const li = s.toolUseId ? inputByToolUse.get(String(s.toolUseId)) : undefined;
+      const name = skillNameOf(s, li);
+      return name != null && name.toLowerCase() === want;
+    };
+  }
+  if (key.startsWith("tool:")) {
+    const want = key.slice(5).toLowerCase();
+    return (s) => toolNameOf(s).toLowerCase() === want;
+  }
+  return HIGHLIGHT_MATCHERS[key] ?? null;
+}
+
 export function SessionDetail({ sessionId, show, onDismiss, highlightKey }: SessionDetailProps) {
   const spans = useTimeframedDql(sessionSpansQuery(sessionId));
   const toolInputs = useTimeframedDql(sessionToolInputsQuery(sessionId));
@@ -140,18 +188,6 @@ export function SessionDetail({ sessionId, show, onDismiss, highlightKey }: Sess
   // Selection is a single span, or a collapsed group of spans.
   const [selected, setSelected] = useState<{ id: string; spans: Span[] } | null>(null);
   const [highlighted, setHighlighted] = useState(false);
-
-  // Auto-select the first span matching the highlight filter once spans load.
-  useEffect(() => {
-    if (highlighted || !highlightKey || records.length === 0) return;
-    const matcher = HIGHLIGHT_MATCHERS[highlightKey];
-    if (!matcher) return;
-    const match = records.find(matcher);
-    if (match) {
-      setSelected({ id: String(match.spanId), spans: [match] });
-      setHighlighted(true);
-    }
-  }, [records, highlightKey, highlighted]);
 
   // tool_use_id -> tool_input JSON string (Claude Code stores inputs in logs).
   const inputByToolUse = useMemo(() => {
@@ -161,6 +197,18 @@ export function SessionDetail({ sessionId, show, onDismiss, highlightKey }: Sess
     }
     return m;
   }, [toolInputs.data]);
+
+  // Auto-select the first span matching the highlight filter once spans load.
+  useEffect(() => {
+    if (highlighted || !highlightKey || records.length === 0) return;
+    const matcher = resolveHighlightMatcher(highlightKey, inputByToolUse);
+    if (!matcher) return;
+    const match = records.find(matcher);
+    if (match) {
+      setSelected({ id: String(match.spanId), spans: [match] });
+      setHighlighted(true);
+    }
+  }, [records, highlightKey, highlighted, inputByToolUse]);
 
   const single = selected && selected.spans.length === 1 ? selected.spans[0] : null;
   const selectedLogInput = single?.toolUseId ? inputByToolUse.get(String(single.toolUseId)) : undefined;

@@ -53,7 +53,6 @@ To learn React, check out the [React documentation](https://reactjs.org/).
 > Shipped features are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ### Planned
-- **Skills & tools overview** — new tab (or Overview section) surfacing high-level skill/tool usage without drilling into individual traces. Answers "which skills and tools do my developers use most?"
 - **Warning icons in traces** — flag risky spans inline: destructive commands, exposed API tokens/secrets, and suspicious web requests (e.g. outbound `POST`).
 - **Codex telemetry** — ingest and visualize OpenAI Codex CLI sessions alongside Claude Code and Copilot.
 - Session / trace arrows to easily go to the next session

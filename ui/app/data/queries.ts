@@ -132,6 +132,65 @@ export function sessionToolInputsQuery(sessionId: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Skills & Tools
+// ---------------------------------------------------------------------------
+
+/** Normalized tool name: Claude Code carries it in `tool_name`; Copilot puts it
+ *  in the span name after an `execute_tool ` prefix. */
+const TOOL_NAME_EXPR = `if(isNotNull(tool_name) and tool_name != "", tool_name,
+    else: trim(replaceString(span.name, "execute_tool ", "")))`;
+
+/** One row per tool across all sessions — the "which tools are used most" table. */
+export function toolUsageQuery(): string {
+  return `${base()}
+| filter is_tool == true
+| fieldsAdd toolName = ${TOOL_NAME_EXPR}
+| filter toolName != "" and toolName != "Skill"
+| summarize {
+    calls = count(),
+    users = countDistinct(uid),
+    sessions = countDistinct(\`session.id\`),
+    failures = countIf(success == false),
+    avgMs = avg(coalesce(duration_ms, toDouble(duration) / 1000000.0)),
+    lastSeen = max(start_time)
+  }, by:{ tool = toolName }
+| sort calls desc
+| limit 100`;
+}
+
+/** Sessions that used one specific tool, for the drill-down sheet. */
+export function toolSessionsQuery(tool: string): string {
+  return `${base()}
+| filter is_tool == true
+| fieldsAdd toolName = ${TOOL_NAME_EXPR}
+| filter toolName == "${q(tool)}"
+| summarize {
+    calls = count(),
+    failures = countIf(success == false),
+    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    dept = takeFirst(dept),
+    lastSeen = max(start_time)
+  }, by:{ sessionId = \`session.id\`, uid }
+| sort calls desc
+| limit 200`;
+}
+
+/** Raw Skill invocations (Claude Code `Skill` tool). The skill name lives inside
+ *  the `tool_input` JSON, so callers parse and aggregate it client-side. */
+export function skillLogsQuery(): string {
+  return `fetch logs
+| filter otel.scope.name == "com.anthropic.claude_code.events"
+    and event.name == "tool_result"
+    and tool_name == "Skill"
+    and isNotNull(tool_input)
+| fields toolInput = tool_input, sessionId = \`session.id\`,
+    email = user.email, name = user.name, dept = user.department,
+    success = success, ts = timestamp
+| sort ts desc
+| limit 5000`;
+}
+
+// ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------
 

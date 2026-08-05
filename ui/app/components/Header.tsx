@@ -7,6 +7,7 @@ const NAV = [
   { to: "/", label: "Overview" },
   { to: "/users", label: "Users" },
   { to: "/sessions", label: "Sessions" },
+  { to: "/tools", label: "Skills & Tools" },
 ];
 
 export const Header = () => {

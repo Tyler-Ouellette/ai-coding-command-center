@@ -54,7 +54,7 @@ function afterPrefix(name: string, prefix: string): string {
 }
 
 /** Pick an icon for a concrete tool name. */
-function toolIcon(toolRaw: string): IconType {
+export function toolIcon(toolRaw: string): IconType {
   const t = toolRaw.toLowerCase();
   if (/(bash|terminal|shell|command|run_in_terminal)/.test(t)) return TerminalIcon;
   if (/(read|view|cat|open)/.test(t)) return DocumentIcon;
