@@ -91,6 +91,7 @@ export function sessionSpansQuery(sessionId: string): string {
     inTok = toLong(inp), outTok = toLong(outp), crTok = toLong(cr), ccTok = toLong(cc), cost,
     ttft = ttft_ms, success, attempt,
     seq = interaction.sequence, prompt = user_prompt, promptLen = user_prompt_length,
+    userRequest = copilot_chat.user_request,
     durMs = coalesce(duration_ms, interaction.duration_ms),
     start = start_time, end = end_time, traceId = toString(trace.id),
     assistant, genOp = gen_ai.operation.name, agent = gen_ai.agent.name,

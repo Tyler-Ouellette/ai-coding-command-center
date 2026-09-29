@@ -38,6 +38,7 @@ import type { IconType, Tone } from "../data/taskKind";
 import { toolIcon } from "../data/taskKind";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
+import { SessionDetail } from "./SessionDetail";
 import {
   overviewKpisQuery,
   spendTimeseriesQuery,
@@ -375,6 +376,31 @@ function SecurityDetailSheet({
   const detail = useTimeframedDql(securityFlagDetailQuery(flagKey));
   const recs = (detail.data?.records ?? []) as Array<Record<string, unknown>>;
   const contextLabel = SEC_CONTEXT_LABELS[flagKey];
+  const [openIdx, setOpenIdx] = useState<number | null>(null);
+
+  // Open a flagged session in place (keeps the list context, unlike a route
+  // navigation) with the same "← Back" + prev/next affordance as the tool/skill
+  // drill-downs. The `?highlight` deep-link auto-selects the offending span.
+  if (openIdx != null && recs[openIdx]) {
+    const idx = openIdx;
+    const cur = recs[idx];
+    return (
+      <SessionDetail
+        sessionId={String(cur.sessionId)}
+        show
+        highlightKey={flagKey}
+        dismissLabel="← Back"
+        onDismiss={() => setOpenIdx(null)}
+        onPrev={idx > 0 ? () => setOpenIdx(idx - 1) : undefined}
+        onNext={idx < recs.length - 1 ? () => setOpenIdx(idx + 1) : undefined}
+        positionLabel={`${idx + 1} of ${recs.length}`}
+        prefetchIds={[
+          recs[idx - 1]?.sessionId ? String(recs[idx - 1].sessionId) : undefined,
+          recs[idx + 1]?.sessionId ? String(recs[idx + 1].sessionId) : undefined,
+        ]}
+      />
+    );
+  }
 
   return (
     <Sheet
@@ -399,19 +425,20 @@ function SecurityDetailSheet({
               <Text style={{ minWidth: 140, fontSize: 11, color: subduedText, fontWeight: 600, textAlign: "right" }}>LAST SEEN</Text>
             </Flex>
             {recs.map((r, i) => (
-              <Link
+              <Flex
                 key={i}
-                to={`/sessions?session=${encodeURIComponent(String(r.sessionId))}&highlight=${flagKey}`}
-                style={{ textDecoration: "none", color: "inherit" }}
+                gap={8}
+                padding={8}
+                alignItems="flex-start"
+                onClick={() => setOpenIdx(i)}
+                style={{ borderBottom: "1px solid var(--dt-colors-border-neutral-default, rgba(255,255,255,0.06))", cursor: "pointer" }}
               >
-                <Flex gap={8} padding={8} alignItems="flex-start" style={{ borderBottom: "1px solid var(--dt-colors-border-neutral-default, rgba(255,255,255,0.06))", cursor: "pointer" }}>
-                  <Text style={{ minWidth: 160, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(r.uid)}</Text>
-                  <Text style={{ minWidth: 120, fontSize: 12, color: subduedText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(r.dept)}</Text>
-                  <Text style={{ minWidth: 60, fontSize: 12, color: toneColor(flagDef.tone), fontWeight: 600, textAlign: "right" }}>{fmtInt(num(r.hits))}</Text>
-                  <Text style={{ flex: 1, fontSize: 11, fontFamily: "monospace", color: subduedText, wordBreak: "break-all" }}>{String(r.context ?? "")}</Text>
-                  <Text style={{ minWidth: 140, fontSize: 11, color: subduedText, textAlign: "right", whiteSpace: "nowrap" }}>{fmtTime(String(r.lastSeen))}</Text>
-                </Flex>
-              </Link>
+                <Text style={{ minWidth: 160, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(r.uid)}</Text>
+                <Text style={{ minWidth: 120, fontSize: 12, color: subduedText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(r.dept)}</Text>
+                <Text style={{ minWidth: 60, fontSize: 12, color: toneColor(flagDef.tone), fontWeight: 600, textAlign: "right" }}>{fmtInt(num(r.hits))}</Text>
+                <Text style={{ flex: 1, fontSize: 11, fontFamily: "monospace", color: subduedText, wordBreak: "break-all" }}>{String(r.context ?? "")}</Text>
+                <Text style={{ minWidth: 140, fontSize: 11, color: subduedText, textAlign: "right", whiteSpace: "nowrap" }}>{fmtTime(String(r.lastSeen))}</Text>
+              </Flex>
             ))}
           </Flex>
         )}

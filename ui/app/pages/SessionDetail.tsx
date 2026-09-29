@@ -2,17 +2,17 @@
 // span.id / span.parent_id, each node tagged with a task-type icon. Right shows
 // the full attributes of the selected span, formatted by task kind.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@dynatrace/strato-components/buttons";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Heading, Text } from "@dynatrace/strato-components/typography";
-import { ChevronDownIcon, ChevronRightIcon, ChevronLeftIcon, CheckmarkIcon, XmarkIcon, ChatIcon, ContainerIcon, LinkIcon } from "@dynatrace/strato-icons";
+import { ChevronDownIcon, ChevronRightIcon, ChevronLeftIcon, CheckmarkIcon, XmarkIcon, ChatIcon, ContainerIcon, LinkIcon, WarningIcon, LockIcon, TerminalIcon, WorldmapIcon } from "@dynatrace/strato-icons";
 import { sendIntent } from "@dynatrace-sdk/navigation";
 
 import { StatTile } from "../components/StatTile";
 import { QueryState } from "../components/QueryState";
 import { toneColor, subduedText, surfaceStyle } from "../components/tokens";
-import { classifySpan, type TaskKind } from "../data/taskKind";
+import { classifySpan, type TaskKind, type Tone } from "../data/taskKind";
 import { assistantBrandIcon } from "../components/brandIcons";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
@@ -77,9 +77,21 @@ function computeRollups(records: Span[]): Map<string, Rollup> {
 
 /** Build the span tree, EXCLUDING model-call spans (those are rolled up separately). */
 function buildTree(records: Span[]): TreeNode[] {
+  // Non-LLM spans always render. LLM/model-call spans are normally rolled up
+  // under their (visible) parent row. But an LLM span whose parent is NOT a
+  // visible non-LLM span — e.g. a Copilot `chat` span sitting at the trace root
+  // — would otherwise be orphaned, hiding its prompt and any risk flags. Keep
+  // those as rows so their warning has somewhere to surface.
+  const nonLlmIds = new Set<string>();
+  for (const s of records) if (!isLlmSpan(s)) nonLlmIds.add(String(s.spanId));
+  const keep = (s: Span): boolean => {
+    if (!isLlmSpan(s)) return true;
+    const pid = s.parent ? String(s.parent) : "";
+    return !(pid && nonLlmIds.has(pid));
+  };
   const byId = new Map<string, TreeNode>();
   for (const s of records) {
-    if (isLlmSpan(s)) continue;
+    if (!keep(s)) continue;
     byId.set(String(s.spanId), { span: s, children: [], depth: 0 });
   }
   const roots: TreeNode[] = [];
@@ -131,7 +143,7 @@ function SessionPrefetch({ sessionId }: { sessionId: string }) {
 /** Per-flag span matcher used to auto-select the most relevant span on deep-link. */
 const HIGHLIGHT_MATCHERS: Record<string, (s: Span) => boolean> = {
   secrets: (s) => {
-    const prompt = String(s.prompt ?? "").toLowerCase();
+    const prompt = `${String(s.prompt ?? "")}\n${String(s.userRequest ?? "")}`.toLowerCase();
     return prompt.includes("ghp_") || prompt.includes("sk-") || prompt.includes("akia") ||
       prompt.includes("sk-ant-api03-") || (prompt.includes("-----begin") && prompt.includes("private key"));
   },
@@ -146,7 +158,7 @@ const HIGHLIGHT_MATCHERS: Record<string, (s: Span) => boolean> = {
       cmd.includes(".ssh/") || cmd.includes(".aws/credentials") || cmd.includes("private_key");
   },
   jailbreak: (s) => {
-    const prompt = String(s.prompt ?? "").toLowerCase();
+    const prompt = `${String(s.prompt ?? "")}\n${String(s.userRequest ?? "")}`.toLowerCase();
     return prompt.includes("ignore all previous instruction") || prompt.includes("reveal your system prompt") ||
       prompt.includes("do anything now") || prompt.includes("bypass your");
   },
@@ -368,6 +380,128 @@ function classifyOf(span: Span) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Inline risk flags
+// ---------------------------------------------------------------------------
+
+/** A risk flag surfaced inline on a trace row. */
+export interface SpanWarning {
+  key: "destructive" | "secret" | "webPost";
+  label: string;
+  tone: Tone;
+  Icon: TaskKind["Icon"];
+}
+
+// Specific enough to avoid flagging innocuous strings like "task-" or "risk-".
+const SECRET_RES: RegExp[] = [
+  /gh[pousr]_[A-Za-z0-9]{20,}/,
+  /sk-ant-api03-[A-Za-z0-9_-]{20,}/,
+  /\bsk-[A-Za-z0-9]{20,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /xox[baprs]-[A-Za-z0-9-]{10,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+];
+
+/** True when a shell command or captured tool arguments issue an outbound POST. */
+function isOutboundPost(span: Span, cmdLower: string, parsed: Record<string, unknown> | null): boolean {
+  if (/\bcurl\b/.test(cmdLower) &&
+    (/-x\s*post/.test(cmdLower) || /--request\s+post/.test(cmdLower) ||
+      /\s-d\b/.test(cmdLower) || /--data(-raw|-binary|-urlencode)?\b/.test(cmdLower))) {
+    return true;
+  }
+  if (/\bwget\b/.test(cmdLower) && /--post-(data|file)\b/.test(cmdLower)) return true;
+  if (parsed) {
+    const method = String(parsed.method ?? parsed.httpMethod ?? "").toUpperCase();
+    if (method === "POST") return true;
+  }
+  return false;
+}
+
+// Inline risk flags for a span: destructive shell commands, exposed secrets /
+// API tokens, and suspicious outbound web requests (e.g. POST). Reuses the same
+// signals as the security highlights but renders per-row in the trace.
+function spanWarnings(span: Span, logInput?: string): SpanWarning[] {
+  const raw = String(span.cmd ?? span.args ?? logInput ?? "");
+  const prompt = `${String(span.prompt ?? "")}\n${String(span.userRequest ?? "")}`.trim();
+  if (!raw && !prompt) return [];
+
+  const cmdLower = raw.toLowerCase();
+  const isTerminal = String(span.tool) === "Bash" || String(span.name).includes("run_in_terminal");
+  const parsed = parsedArgs(span, logInput);
+  const warnings: SpanWarning[] = [];
+
+  if (isTerminal && (cmdLower.includes("rm -rf") || cmdLower.includes("chmod 777") ||
+    cmdLower.includes("mkfs") || cmdLower.includes("dd if="))) {
+    warnings.push({ key: "destructive", label: "Destructive command", tone: "critical", Icon: TerminalIcon });
+  }
+
+  const hay = `${raw}\n${prompt}`;
+  if (SECRET_RES.some((re) => re.test(hay))) {
+    warnings.push({ key: "secret", label: "Exposed API token / secret", tone: "critical", Icon: LockIcon });
+  }
+
+  if (isOutboundPost(span, cmdLower, parsed)) {
+    warnings.push({ key: "webPost", label: "Outbound POST request", tone: "warning", Icon: WorldmapIcon });
+  }
+
+  return warnings;
+}
+
+/** Collapse a list of warnings to one per distinct kind, preserving order. */
+function dedupeWarnings(warnings: SpanWarning[]): SpanWarning[] {
+  const seen = new Set<string>();
+  const out: SpanWarning[] = [];
+  for (const w of warnings) {
+    if (seen.has(w.key)) continue;
+    seen.add(w.key);
+    out.push(w);
+  }
+  return out;
+}
+
+/** Small inline cluster of warning icons for a trace row. */
+function WarningIcons({ warnings, size = 13 }: { warnings: SpanWarning[]; size?: number }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Flex alignItems="center" gap={2}>
+      {warnings.map((w) => (
+        <span
+          key={w.key}
+          title={w.label}
+          style={{ color: toneColor(w.tone), display: "flex" }}
+        >
+          <w.Icon size={size} />
+        </span>
+      ))}
+    </Flex>
+  );
+}
+
+/** Full-width callout listing a span's risk flags in the detail panel. */
+function WarningBanner({ warnings }: { warnings: SpanWarning[] }) {
+  const critical = warnings.some((w) => w.tone === "critical");
+  const tone: Tone = critical ? "critical" : "warning";
+  return (
+    <Flex
+      flexDirection="column"
+      gap={4}
+      style={{
+        padding: "8px 10px",
+        borderRadius: 4,
+        border: `1px solid ${toneColor(tone)}`,
+        background: "var(--dt-colors-background-container-neutral-default, rgba(0,0,0,0.04))",
+      }}
+    >
+      {warnings.map((w) => (
+        <Flex key={w.key} alignItems="center" gap={6}>
+          <span style={{ color: toneColor(w.tone), display: "flex" }}><w.Icon size={14} /></span>
+          <Text style={{ fontSize: 12, color: toneColor(w.tone), fontWeight: 600 }}>{w.label}</Text>
+        </Flex>
+      ))}
+    </Flex>
+  );
+}
+
 // Subdued secondary text for a tree row, native-tracing style: the invoked
 // skill name for Skill spans, else the most identifying tool argument (command,
 // file, URL, …). Args live on the span (Copilot) or the correlated tool_result
@@ -554,6 +688,11 @@ function SpanTree({
         const gid = `grp:${String(run[0].span.spanId)}`;
         const open = expanded.has(gid);
         const kind = classifyOf(run[0].span);
+        const groupWarnings = dedupeWarnings(
+          run.flatMap((n) =>
+            spanWarnings(n.span, n.span.toolUseId ? inputByToolUse.get(String(n.span.toolUseId)) : undefined),
+          ),
+        );
         out.push(
           <div key={gid}>
             <GroupRow
@@ -562,6 +701,7 @@ function SpanTree({
               tone={kind.tone}
               label={kind.label}
               count={runLen}
+              warnings={groupWarnings}
               open={open}
               selected={selectedId === gid}
               onToggle={() => toggle(gid)}
@@ -600,6 +740,7 @@ function GroupRow({
   tone,
   label,
   count,
+  warnings,
   open,
   selected,
   onToggle,
@@ -610,6 +751,7 @@ function GroupRow({
   tone: TaskKind["tone"];
   label: string;
   count: number;
+  warnings: SpanWarning[];
   open: boolean;
   selected: boolean;
   onToggle: () => void;
@@ -643,6 +785,7 @@ function GroupRow({
       </span>
       <span style={{ color: toneColor(tone), display: "flex" }}><Icon size={16} /></span>
       <Text style={{ fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</Text>
+      <WarningIcons warnings={warnings} />
       {!open ? <Text style={{ fontSize: 11, color: subduedText }}>collapsed</Text> : null}
       <span
         onClick={toggleClick}
@@ -695,10 +838,18 @@ function SpanRow({
   const cost = num(s.cost) + (rollup?.cost ?? 0);
   const Icon = kind.Icon;
   const secondary = rowSecondary(s, logInput);
+  const warnings = spanWarnings(s, logInput);
   // Brand the turn (root) node with the assistant's logo.
   const brand = node.depth === 0 ? assistantBrandIcon(String(s.assistant ?? ""), 16) : null;
 
+  // Bring a programmatically-selected row (e.g. a security deep-link) into view.
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (selected) rowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
+
   return (
+    <div ref={rowRef}>
     <Flex
       alignItems="center"
       gap={6}
@@ -711,6 +862,7 @@ function SpanRow({
         cursor: "pointer",
         borderRadius: 4,
         background: selected ? "var(--dt-colors-background-container-neutral-default, rgba(0,0,0,0.06))" : undefined,
+        boxShadow: selected ? "inset 3px 0 0 var(--dt-colors-background-accent-primary-default, #464cce)" : undefined,
       }}
     >
       <span
@@ -727,6 +879,7 @@ function SpanRow({
         <span style={{ fontWeight: 600 }}>{kind.label}</span>
         {secondary ? <span style={{ color: subduedText }}>{` | ${secondary}`}</span> : null}
       </Text>
+      <WarningIcons warnings={warnings} />
       {rollup ? (
         <Flex alignItems="center" gap={2} style={{ color: toneColor("info") }} title={`${rollup.count} model call${rollup.count > 1 ? "s" : ""}`}>
           <ChatIcon size={12} />
@@ -741,6 +894,7 @@ function SpanRow({
         <CheckmarkIcon size={13} style={{ color: toneColor("primary") }} />
       ) : null}
     </Flex>
+    </div>
   );
 }
 
@@ -795,6 +949,7 @@ function SpanDetail({ span, logInput, rollup }: { span: Span | null; logInput?: 
   });
   const Icon = kind.Icon;
   const success = span.success;
+  const warnings = spanWarnings(span, logInput);
 
   return (
     <Flex flexDirection="column" gap={8}>
@@ -802,6 +957,8 @@ function SpanDetail({ span, logInput, rollup }: { span: Span | null; logInput?: 
         <span style={{ color: toneColor(kind.tone), display: "flex" }}><Icon size={20} /></span>
         <Heading level={5} style={{ margin: 0 }}>{kind.label}</Heading>
       </Flex>
+
+      {warnings.length > 0 ? <WarningBanner warnings={warnings} /> : null}
 
       <div>
         <Row label="Type" value={String(span.name ?? "")} />
