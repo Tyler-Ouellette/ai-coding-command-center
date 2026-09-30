@@ -2,6 +2,7 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { AppHeader } from "@dynatrace/strato-components/layouts";
 import { TimeframePicker } from "../data/timeframe";
+import { SettingsControl } from "./SettingsControl";
 
 const NAV = [
   { to: "/", label: "Overview" },
@@ -29,6 +30,7 @@ export const Header = () => {
       </AppHeader.Navigation>
       <AppHeader.ActionItems>
         <TimeframePicker />
+        <SettingsControl />
       </AppHeader.ActionItems>
     </AppHeader>
   );

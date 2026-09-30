@@ -5,7 +5,7 @@ import React, { useMemo, useState } from "react";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Heading, Text } from "@dynatrace/strato-components/typography";
 import { DataTable } from "@dynatrace/strato-components/tables";
-import { Select, SelectOption } from "@dynatrace/strato-components/forms";
+import { TextInput } from "@dynatrace/strato-components/forms";
 
 import { StatTile } from "../components/StatTile";
 import { Section } from "../components/Section";
@@ -16,6 +16,7 @@ import { fmtInt, fmtTokens, fmtUSD, fmtTime } from "../data/normalize";
 import { usersQuery, departmentsQuery } from "../data/queries";
 import { assistantBrandIcon, AnthropicIcon, CopilotIcon } from "../components/brandIcons";
 import { CenterCell } from "../components/CenterCell";
+import { FilterSelect } from "../components/FilterSelect";
 import { UserDetail } from "./UserDetail";
 
 function assistantMix(r: Record<string, unknown>): string {
@@ -30,15 +31,25 @@ function assistantMix(r: Record<string, unknown>): string {
 export const Users = () => {
   const users = useTimeframedDql(usersQuery());
   const depts = useTimeframedDql(departmentsQuery());
+  const [search, setSearch] = useState("");
+  const [assistantFilter, setAssistantFilter] = useState<string>("all");
   const [deptFilter, setDeptFilter] = useState<string>("all");
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [selectedUser, setSelectedUser] = useState<string>("");
 
   const allRows = (users.data?.records ?? []) as Array<Record<string, unknown>>;
-  const rows = useMemo(
-    () => (deptFilter === "all" ? allRows : allRows.filter((r) => String(r.dept) === deptFilter)),
-    [allRows, deptFilter],
-  );
+  const rows = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return allRows.filter((r) => {
+      if (deptFilter !== "all" && String(r.dept) !== deptFilter) return false;
+      if (assistantFilter !== "all" && assistantMix(r) !== assistantFilter) return false;
+      if (term) {
+        const blob = `${String(r.user ?? "")} ${String(r.dept ?? "")} ${String(r.email ?? "")}`.toLowerCase();
+        if (!blob.includes(term)) return false;
+      }
+      return true;
+    });
+  }, [allRows, search, assistantFilter, deptFilter]);
 
   const deptOptions = useMemo(() => {
     const set = new Set(allRows.map((r) => String(r.dept)));
@@ -105,12 +116,31 @@ export const Users = () => {
           <Heading level={2} style={{ margin: 0 }}>Users</Heading>
           <Text style={{ color: subduedText }}>Coding activity by engineer. Click a row for detail.</Text>
         </Flex>
-        <Select name="dept" value={deptFilter} onChange={(v) => setDeptFilter((v as string) ?? "all")} style={{ minWidth: 200 }}>
-          <SelectOption value="all">All departments</SelectOption>
-          {deptOptions.map((d) => (
-            <SelectOption key={d} value={d}>{d}</SelectOption>
-          ))}
-        </Select>
+        <Flex gap={8} alignItems="flex-end" flexFlow="wrap">
+          <Flex flexDirection="column" gap={4} style={{ minWidth: 220 }}>
+            <Text style={{ fontSize: 12, color: subduedText }}>Search</Text>
+            <TextInput value={search} onChange={(v) => setSearch(v)} placeholder="User, dept, email…" />
+          </Flex>
+          <FilterSelect
+            label="Assistant"
+            value={assistantFilter}
+            onChange={setAssistantFilter}
+            minWidth={150}
+            options={[
+              { value: "all", label: "All assistants" },
+              { value: "Claude Code", label: "Claude Code" },
+              { value: "Copilot", label: "Copilot" },
+              { value: "Both", label: "Both" },
+            ]}
+          />
+          <FilterSelect
+            label="Department"
+            value={deptFilter}
+            onChange={setDeptFilter}
+            minWidth={200}
+            options={[{ value: "all", label: "All departments" }, ...deptOptions.map((d) => ({ value: d, label: d }))]}
+          />
+        </Flex>
       </Flex>
 
       {/* Department rollup */}
@@ -132,23 +162,29 @@ export const Users = () => {
 
       <Section title={`${rows.length} user${rows.length === 1 ? "" : "s"}`} bare>
         <QueryState result={users} minHeight={200}>
-          {() => (
-            <DataTable
-              data={rows}
-              columns={columns as never}
-              sortable
-              fullWidth
-              rowId={(r: Record<string, unknown>) => String(r.uid)}
-              interactiveRows
-              onActiveRowChange={(uid) => {
-                if (uid) {
-                  const row = rows.find((r) => String(r.uid) === uid);
-                  setSelectedUser(row ? String(row.user) : uid);
-                }
-                setSelectedUid(uid);
-              }}
-            />
-          )}
+          {() =>
+            rows.length === 0 ? (
+              <Flex justifyContent="center" padding={32}>
+                <Text style={{ color: subduedText }}>No users match the current filters.</Text>
+              </Flex>
+            ) : (
+              <DataTable
+                data={rows}
+                columns={columns as never}
+                sortable
+                fullWidth
+                rowId={(r: Record<string, unknown>) => String(r.uid)}
+                interactiveRows
+                onActiveRowChange={(uid) => {
+                  if (uid) {
+                    const row = rows.find((r) => String(r.uid) === uid);
+                    setSelectedUser(row ? String(row.user) : uid);
+                  }
+                  setSelectedUid(uid);
+                }}
+              />
+            )
+          }
         </QueryState>
       </Section>
 

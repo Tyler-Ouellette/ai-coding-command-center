@@ -7,16 +7,18 @@ import { useSearchParams } from "react-router-dom";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Heading, Text } from "@dynatrace/strato-components/typography";
 import { DataTable, type DataTableRef } from "@dynatrace/strato-components/tables";
+import { TextInput } from "@dynatrace/strato-components/forms";
 import { CheckmarkIcon } from "@dynatrace/strato-icons";
 
 import { Section } from "../components/Section";
 import { QueryState } from "../components/QueryState";
 import { toneColor, subduedText } from "../components/tokens";
 import { useTimeframedDql, num } from "../data/useQuery";
-import { fmtInt, fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
+import { fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
 import { sessionsQuery } from "../data/queries";
 import { assistantBrandIcon } from "../components/brandIcons";
 import { CenterCell } from "../components/CenterCell";
+import { FilterSelect } from "../components/FilterSelect";
 import { SessionDetail } from "./SessionDetail";
 
 function durationOf(r: Record<string, unknown>): number {
@@ -25,11 +27,34 @@ function durationOf(r: Record<string, unknown>): number {
   return en > st ? en - st : 0;
 }
 
+type Outcome = "success" | "error" | "blocked";
+
+function outcomeOf(r: Record<string, unknown>): Outcome {
+  if (num(r.errors) > 0) return "error";
+  if (num(r.blocked) > 0) return "blocked";
+  return "success";
+}
+
+/** Flatten the searchable text of a session row (user, dept, repo, tools, prompts). */
+function searchBlob(r: Record<string, unknown>): string {
+  const parts: string[] = [String(r.user ?? ""), String(r.dept ?? ""), String(r.repo ?? "")];
+  for (const key of ["toolNames", "prompts"] as const) {
+    const v = r[key];
+    if (Array.isArray(v)) parts.push(v.map((x) => String(x)).join(" "));
+  }
+  return parts.join(" ").toLowerCase();
+}
+
 export const Sessions = () => {
   const sessions = useTimeframedDql(sessionsQuery());
   const [params, setParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const tableRef = useRef<DataTableRef>(null);
+
+  const [search, setSearch] = useState("");
+  const [assistantFilter, setAssistantFilter] = useState<string>("all");
+  const [repoFilter, setRepoFilter] = useState<string>("all");
+  const [outcomeFilter, setOutcomeFilter] = useState<string>("all");
 
   // Deep-link: open the session named in ?session=
   const deepLink = params.get("session");
@@ -38,7 +63,27 @@ export const Sessions = () => {
     if (deepLink) setSelectedId(deepLink);
   }, [deepLink]);
 
-  const rows = (sessions.data?.records ?? []) as Array<Record<string, unknown>>;
+  const allRows = (sessions.data?.records ?? []) as Array<Record<string, unknown>>;
+
+  const assistantOptions = useMemo(
+    () => Array.from(new Set(allRows.map((r) => String(r.assistant ?? "")).filter(Boolean))).sort(),
+    [allRows],
+  );
+  const repoOptions = useMemo(
+    () => Array.from(new Set(allRows.map((r) => String(r.repo ?? "")).filter(Boolean))).sort(),
+    [allRows],
+  );
+
+  const rows = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return allRows.filter((r) => {
+      if (assistantFilter !== "all" && String(r.assistant ?? "") !== assistantFilter) return false;
+      if (repoFilter !== "all" && String(r.repo ?? "") !== repoFilter) return false;
+      if (outcomeFilter !== "all" && outcomeOf(r) !== outcomeFilter) return false;
+      if (term && !searchBlob(r).includes(term)) return false;
+      return true;
+    });
+  }, [allRows, search, assistantFilter, repoFilter, outcomeFilter]);
 
   const columns = useMemo(
     () => [
@@ -125,20 +170,57 @@ export const Sessions = () => {
         <Text style={{ color: subduedText }}>Every coding session. Click a row to inspect its span tree.</Text>
       </Flex>
 
+      <Flex gap={12} alignItems="flex-end" flexFlow="wrap">
+        <Flex flexDirection="column" gap={4} style={{ flex: 1, minWidth: 260 }}>
+          <Text style={{ fontSize: 12, color: subduedText }}>Search</Text>
+          <TextInput value={search} onChange={(v) => setSearch(v)} placeholder="Prompts, tools, user, repo…" />
+        </Flex>
+        <FilterSelect
+          label="Assistant"
+          value={assistantFilter}
+          onChange={setAssistantFilter}
+          options={[{ value: "all", label: "All assistants" }, ...assistantOptions.map((a) => ({ value: a, label: a }))]}
+        />
+        <FilterSelect
+          label="Repository"
+          value={repoFilter}
+          onChange={setRepoFilter}
+          options={[{ value: "all", label: "All repos" }, ...repoOptions.map((r) => ({ value: r, label: r }))]}
+        />
+        <FilterSelect
+          label="Outcome"
+          value={outcomeFilter}
+          onChange={setOutcomeFilter}
+          minWidth={150}
+          options={[
+            { value: "all", label: "All outcomes" },
+            { value: "success", label: "Success" },
+            { value: "error", label: "Errors" },
+            { value: "blocked", label: "Blocked" },
+          ]}
+        />
+      </Flex>
+
       <Section title={`${rows.length} session${rows.length === 1 ? "" : "s"}`} bare>
         <QueryState result={sessions} minHeight={200}>
-          {() => (
-            <DataTable
-              ref={tableRef}
-              data={rows}
-              columns={columns as never}
-              sortable
-              fullWidth
-              rowId={(r: Record<string, unknown>) => String(r.sessionId)}
-              interactiveRows
-              onActiveRowChange={(id) => setSelectedId(id)}
-            />
-          )}
+          {() =>
+            rows.length === 0 ? (
+              <Flex justifyContent="center" padding={32}>
+                <Text style={{ color: subduedText }}>No sessions match the current filters.</Text>
+              </Flex>
+            ) : (
+              <DataTable
+                ref={tableRef}
+                data={rows}
+                columns={columns as never}
+                sortable
+                fullWidth
+                rowId={(r: Record<string, unknown>) => String(r.sessionId)}
+                interactiveRows
+                onActiveRowChange={(id) => setSelectedId(id)}
+              />
+            )
+          }
         </QueryState>
       </Section>
 

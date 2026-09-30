@@ -8,6 +8,8 @@
 // department are computed identically everywhere and reconcile with that
 // dashboard.
 
+import { personalEmailPredicateDQL } from "./config";
+
 export const CODING_SERVICES = [
   "claude-code",
   "claude-code-desktop",
@@ -25,28 +27,31 @@ const COST_EXPR = `if(contains(model,"opus"), toDouble(fresh)*15.0/1000000 + toD
 // The normalization prelude. Produces, on every span:
 //   assistant, is_llm, is_tool, is_interaction, is_blocked,
 //   inp/outp/cr/cc (token counts), model, is_personal, dept, fresh, cost
-const NORMALIZE = `
+// Rebuilt per call so the configurable corporate-domain predicate stays current.
+function normalizePrelude(): string {
+  return `
 | fieldsAdd assistant = if(service.name=="copilot-chat","GitHub Copilot", else:"Claude Code"),
-    is_llm = (gen_ai.operation.name=="chat" or span.name=="claude_code.llm_request"),
-    is_tool = (gen_ai.operation.name=="execute_tool" or span.name=="claude_code.tool"),
-    is_interaction = (span.name=="claude_code.interaction"),
-    is_blocked = (span.name=="claude_code.tool.blocked_on_user"),
+    is_llm = (gen_ai.operation.name=="chat" or span.name=="claude_code.llm_request" or span.name=="claude-code.llm_request"),
+    is_tool = (gen_ai.operation.name=="execute_tool" or span.name=="claude_code.tool" or matchesValue(span.name, "claude-code.tool.*") and not in(span.name, array("claude-code.tool.blocked_on_user", "claude-code.tool.execution"))),
+    is_interaction = (span.name=="claude_code.interaction" or span.name=="claude-code.interaction"),
+    is_blocked = (span.name=="claude_code.tool.blocked_on_user" or span.name=="claude-code.tool.blocked_on_user"),
     inp = coalesce(gen_ai.usage.input_tokens, input_tokens, 0),
     outp = coalesce(gen_ai.usage.output_tokens, output_tokens, 0),
     cr = coalesce(gen_ai.usage.cache_read.input_tokens, cache_read_tokens, 0),
     cc = coalesce(gen_ai.usage.cache_creation.input_tokens, cache_creation_tokens, 0),
     model = coalesce(gen_ai.request.model, model, ""),
-    is_personal = (isNotNull(user.email) and not contains(lower(user.email), "@dynatrace.com"))
+    is_personal = ${personalEmailPredicateDQL()}
 | fieldsAdd dept = if(is_personal, "Personal Account", else: coalesce(user.department, "Unmapped / Pilot")),
     uid = coalesce(user.email, user.name, "(unknown)"),
     fresh = if(service.name=="copilot-chat", if(toLong(inp)-toLong(cr)-toLong(cc)<0, 0, else: toLong(inp)-toLong(cr)-toLong(cc)), else: toLong(inp))
 | fieldsAdd cost = ${COST_EXPR}`;
+}
 
 const serviceArray = CODING_SERVICES.map((s) => `"${s}"`).join(",");
 
 /** `fetch spans` scoped to the coding services, with all normalized fields added. */
 export function base(): string {
-  return `fetch spans\n| filter in(service.name, array(${serviceArray}))${NORMALIZE}`;
+  return `fetch spans\n| filter in(service.name, array(${serviceArray}))${normalizePrelude()}`;
 }
 
 // ---------------------------------------------------------------------------

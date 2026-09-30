@@ -6,7 +6,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@dynatrace/strato-components/buttons";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Heading, Text } from "@dynatrace/strato-components/typography";
-import { ChevronDownIcon, ChevronRightIcon, ChevronLeftIcon, CheckmarkIcon, XmarkIcon, ChatIcon, ContainerIcon, LinkIcon, WarningIcon, LockIcon, TerminalIcon, WorldmapIcon } from "@dynatrace/strato-icons";
+import { TextInput } from "@dynatrace/strato-components/forms";
+import { ChevronDownIcon, ChevronUpIcon, ChevronRightIcon, ChevronLeftIcon, CheckmarkIcon, XmarkIcon, ChatIcon, ContainerIcon, LinkIcon, WarningIcon, LockIcon, TerminalIcon, WorldmapIcon, GhostIcon } from "@dynatrace/strato-icons";
 import { sendIntent } from "@dynatrace-sdk/navigation";
 
 import { StatTile } from "../components/StatTile";
@@ -37,6 +38,7 @@ export interface Rollup {
   ttftSum: number;
   ttftN: number;
   failures: number;
+  shadowCount: number;
   calls: Span[];
 }
 
@@ -54,7 +56,7 @@ function computeRollups(records: Span[]): Map<string, Rollup> {
     if (!pid) continue;
     let r = map.get(pid);
     if (!r) {
-      r = { count: 0, models: {}, inTok: 0, outTok: 0, crTok: 0, ccTok: 0, cost: 0, ttftSum: 0, ttftN: 0, failures: 0, calls: [] };
+      r = { count: 0, models: {}, inTok: 0, outTok: 0, crTok: 0, ccTok: 0, cost: 0, ttftSum: 0, ttftN: 0, failures: 0, shadowCount: 0, calls: [] };
       map.set(pid, r);
     }
     r.count += 1;
@@ -70,6 +72,7 @@ function computeRollups(records: Span[]): Map<string, Rollup> {
       r.ttftN += 1;
     }
     if (s.success === false) r.failures += 1;
+    if (s.is_llm && s.is_personal) r.shadowCount += 1;
     r.calls.push(s);
   }
   return map;
@@ -615,6 +618,28 @@ function seedFor(mode: TreeMode, roots: TreeNode[]): Set<string> {
   return collectDefaultIds(roots);
 }
 
+/** Lowercased searchable text of a span: name, tool, command/args, prompt, output. */
+function spanSearchText(span: Span, logInput?: string): string {
+  const args = span.args ?? logInput ?? "";
+  return [span.name, span.tool, span.cmd, args, span.prompt, span.userRequest, span.toolOutputPreview]
+    .map((x) => String(x ?? ""))
+    .join(" ")
+    .toLowerCase();
+}
+
+/** Flatten the tree into display (pre-order) order. */
+function flattenTree(roots: TreeNode[]): TreeNode[] {
+  const out: TreeNode[] = [];
+  const walk = (nodes: TreeNode[]) => {
+    for (const n of nodes) {
+      out.push(n);
+      if (n.children.length) walk(n.children);
+    }
+  };
+  walk(roots);
+  return out;
+}
+
 function SpanTree({
   roots,
   rollups,
@@ -654,9 +679,45 @@ function SpanTree({
       return next;
     });
 
+  // In-trace text search: highlight matching spans, step through them, and
+  // (while a query is active) force the whole tree open so no match is hidden.
+  const [search, setSearch] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const term = search.trim().toLowerCase();
+
+  const matchIds = useMemo(() => {
+    if (!term) return [] as string[];
+    return flattenTree(roots)
+      .filter((n) => spanSearchText(n.span, n.span.toolUseId ? inputByToolUse.get(String(n.span.toolUseId)) : undefined).includes(term))
+      .map((n) => String(n.span.spanId));
+  }, [term, roots, inputByToolUse]);
+
+  const matchSet = useMemo(() => new Set(matchIds), [matchIds]);
+  const allIds = useMemo(() => (term ? collectAllIds(roots) : null), [term, roots]);
+  const view = allIds ?? expanded;
+
+  // Reset the cursor and jump to the first match whenever the match set changes.
+  useEffect(() => {
+    setCursor(0);
+    if (matchIds.length > 0) {
+      const first = roots.length ? flattenTree(roots).find((n) => String(n.span.spanId) === matchIds[0]) : undefined;
+      if (first) onSelectSpan(first.span);
+    }
+    // onSelectSpan/roots are stable enough; keying on the ordered id list avoids loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchIds.join("|")]);
+
+  const stepMatch = (dir: 1 | -1) => {
+    if (matchIds.length === 0) return;
+    const next = (cursor + dir + matchIds.length) % matchIds.length;
+    setCursor(next);
+    const node = flattenTree(roots).find((n) => String(n.span.spanId) === matchIds[next]);
+    if (node) onSelectSpan(node.span);
+  };
+
   const renderNode = (n: TreeNode): React.ReactNode => {
     const id = String(n.span.spanId);
-    const isOpen = expanded.has(id);
+    const isOpen = view.has(id);
     const hasChildren = n.children.length > 0;
     return (
       <div key={id}>
@@ -667,6 +728,7 @@ function SpanTree({
           isOpen={isOpen}
           hasChildren={hasChildren}
           selected={selectedId === id}
+          isMatch={matchSet.has(id)}
           onToggle={() => toggle(id)}
           onSelect={() => onSelectSpan(n.span)}
         />
@@ -686,7 +748,7 @@ function SpanTree({
       if (key && runLen >= MIN_RUN) {
         const run = nodes.slice(i, j);
         const gid = `grp:${String(run[0].span.spanId)}`;
-        const open = expanded.has(gid);
+        const open = view.has(gid);
         const kind = classifyOf(run[0].span);
         const groupWarnings = dedupeWarnings(
           run.flatMap((n) =>
@@ -728,6 +790,25 @@ function SpanTree({
       >
         <Button variant="emphasized" onClick={() => applyMode("all")}>Expand all</Button>
         <Button variant="emphasized" onClick={() => applyMode("none")}>Collapse all</Button>
+        <div style={{ flex: 1, minWidth: 120 }}>
+          <TextInput
+            value={search}
+            onChange={(v) => setSearch(v)}
+            placeholder="Search spans…"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") stepMatch(e.shiftKey ? -1 : 1);
+            }}
+          />
+        </div>
+        {term ? (
+          <Flex alignItems="center" gap={4}>
+            <Text style={{ fontSize: 12, color: subduedText, minWidth: 54, textAlign: "right" }}>
+              {matchIds.length ? `${cursor + 1} / ${matchIds.length}` : "No matches"}
+            </Text>
+            <Button disabled={matchIds.length === 0} onClick={() => stepMatch(-1)} title="Previous match (Shift+Enter)"><ChevronUpIcon /></Button>
+            <Button disabled={matchIds.length === 0} onClick={() => stepMatch(1)} title="Next match (Enter)"><ChevronDownIcon /></Button>
+          </Flex>
+        ) : null}
       </Flex>
       {renderNodes(roots)}
     </div>
@@ -813,6 +894,7 @@ function SpanRow({
   isOpen,
   hasChildren,
   selected,
+  isMatch,
   onToggle,
   onSelect,
 }: {
@@ -822,6 +904,7 @@ function SpanRow({
   isOpen: boolean;
   hasChildren: boolean;
   selected: boolean;
+  isMatch?: boolean;
   onToggle: () => void;
   onSelect: () => void;
 }) {
@@ -839,6 +922,10 @@ function SpanRow({
   const Icon = kind.Icon;
   const secondary = rowSecondary(s, logInput);
   const warnings = spanWarnings(s, logInput);
+  const isShadowAI = s.is_llm && s.is_personal;
+  // Shadow-AI model calls hidden inside this row's rollup (365 of 371 sit under a parent turn).
+  const rollupShadow = rollup?.shadowCount ?? 0;
+  const shadowFlagged = isShadowAI || rollupShadow > 0;
   // Brand the turn (root) node with the assistant's logo.
   const brand = node.depth === 0 ? assistantBrandIcon(String(s.assistant ?? ""), 16) : null;
 
@@ -861,8 +948,15 @@ function SpanRow({
         paddingBottom: 3,
         cursor: "pointer",
         borderRadius: 4,
-        background: selected ? "var(--dt-colors-background-container-neutral-default, rgba(0,0,0,0.06))" : undefined,
+        background: selected 
+          ? "var(--dt-colors-background-container-neutral-default, rgba(0,0,0,0.06))"
+          : isMatch
+          ? "rgba(255, 199, 0, 0.22)"
+          : shadowFlagged
+          ? "rgba(252, 188, 5, 0.08)"
+          : undefined,
         boxShadow: selected ? "inset 3px 0 0 var(--dt-colors-background-accent-primary-default, #464cce)" : undefined,
+        border: shadowFlagged && !selected ? "1px solid rgba(252, 188, 5, 0.3)" : undefined,
       }}
     >
       <span
@@ -879,6 +973,20 @@ function SpanRow({
         <span style={{ fontWeight: 600 }}>{kind.label}</span>
         {secondary ? <span style={{ color: subduedText }}>{` | ${secondary}`}</span> : null}
       </Text>
+      {shadowFlagged ? (
+        <Flex
+          alignItems="center"
+          gap={2}
+          title={rollupShadow > 0 && !isShadowAI
+            ? `${rollupShadow} shadow-AI model call${rollupShadow > 1 ? "s" : ""} (personal account) rolled up here`
+            : "Shadow-AI call from personal account"}
+        >
+          <GhostIcon size={12} style={{ color: toneColor("warning") }} />
+          {rollupShadow > 1 && !isShadowAI ? (
+            <Text style={{ fontSize: 11, color: toneColor("warning") }}>×{rollupShadow}</Text>
+          ) : null}
+        </Flex>
+      ) : null}
       <WarningIcons warnings={warnings} />
       {rollup ? (
         <Flex alignItems="center" gap={2} style={{ color: toneColor("info") }} title={`${rollup.count} model call${rollup.count > 1 ? "s" : ""}`}>
@@ -1214,8 +1322,17 @@ function ToolArgs({ span, logInput }: { span: Span; logInput?: string }) {
 
   // Arguments come from the Copilot span (gen_ai.tool.call.arguments) or, for
   // Claude Code, from the correlated tool_result log event (tool_input).
+  // For the hyphenated Mac format, fall back to tool.output.preview.
   const raw = span.args ?? logInput;
   if (raw == null || raw === "") {
+    if (span.toolOutputPreview && String(span.toolOutputPreview).trim()) {
+      return (
+        <Flex flexDirection="column" gap={4} style={{ marginTop: 6 }}>
+          <Text style={{ fontSize: 12, color: subduedText }}>Output preview</Text>
+          <CodeBlock text={String(span.toolOutputPreview)} />
+        </Flex>
+      );
+    }
     return <Text style={{ fontSize: 12, color: subduedText, marginTop: 6 }}>No arguments captured for this tool.</Text>;
   }
 
@@ -1277,8 +1394,9 @@ function summarize(records: Span[]) {
   let branch = "";
   for (const s of records) {
     const name = String(s.name ?? "");
-    if (name === "claude_code.interaction") interactions += 1;
-    if (name === "claude_code.tool" || String(s.genOp) === "execute_tool") tools += 1;
+    if (name === "claude_code.interaction" || name === "claude-code.interaction") interactions += 1;
+    if (name === "claude_code.tool" || String(s.genOp) === "execute_tool" ||
+      (name.startsWith("claude-code.tool.") && name !== "claude-code.tool.blocked_on_user" && name !== "claude-code.tool.execution")) tools += 1;
     tokens += num(s.inTok) + num(s.outTok) + num(s.crTok);
     cost += num(s.cost);
     const st = new Date(String(s.start)).getTime();

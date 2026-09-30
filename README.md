@@ -50,12 +50,14 @@ To learn React, check out the [React documentation](https://reactjs.org/).
 
 ## Roadmap
 
-> Shipped features are tracked in [CHANGELOG.md](CHANGELOG.md).
+### Recently Shipped
+- **Warning icons in traces** — inline risk flags on spans: destructive commands, exposed API tokens/secrets, outbound POST requests, and credential file access.
+- **Prompt-injection & anomaly detection** — jailbreak phrase detection and cross-span sequence anomalies (sensitive read → outbound request, injection prompt → risky action, runaway tool loops).
+- **Session navigation** — prev/next arrows in the session detail view with keyboard shortcuts (← →).
+- **Copilot user request** — the user's chat message is now shown in the span detail panel for GitHub Copilot sessions.
 
 ### Planned
-- **Warning icons in traces** — flag risky spans inline: destructive commands, exposed API tokens/secrets, and suspicious web requests (e.g. outbound `POST`).
 - **Codex telemetry** — ingest and visualize OpenAI Codex CLI sessions alongside Claude Code and Copilot.
-- Session / trace arrows to easily go to the next session
 
 ### Ideas / Backlog
 - **Cost & token trends** — per-user and per-department spend over time, with top cost drivers and week-over-week deltas.
@@ -64,13 +66,4 @@ To learn React, check out the [React documentation](https://reactjs.org/).
 - **Error & blocked-tool drill-down** — a focused view of failed LLM calls and approval-blocked tools to spot friction.
 - **Repo/branch attribution** — group sessions by repository and branch to see where AI assistance is concentrated.
 - **Export & sharing** — export a session trace or overview as a shareable Dynatrace document/dashboard.
-- **Prompt-injection & anomaly detection** — surface suspicious prompts and abnormal tool sequences for security review.
-
-
-## Roadmap of To-Do
-
-- Update Overview page, or create a new tab for skills and tools usage and overview page. Give high level usage without needed to drill down into individual traces.
-- Warning Icons in Traces (destructive commands, api tokens exposed, suspicious web requests such as a POST request)
-- Codex Telemetry data
-- Display skill name used in the trace view for easier analysis
 

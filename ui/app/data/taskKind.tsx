@@ -88,6 +88,24 @@ export function classifySpan(span: SpanLike): TaskKind {
     return { kind: "tool", label: tool, Icon: toolIcon(tool), tone: "neutral" };
   }
 
+  // Hyphenated Claude Code span name variants (service.name == "claude-code" builds)
+  if (name === "claude-code.interaction") {
+    return { kind: "interaction", label: "User prompt", Icon: AccountIcon, tone: "primary" };
+  }
+  if (name === "claude-code.llm_request") {
+    return { kind: "llm", label: span.model || "LLM request", Icon: ChatIcon, tone: "info" };
+  }
+  if (name === "claude-code.tool.blocked_on_user") {
+    return { kind: "blocked", label: "Awaiting approval", Icon: PauseIcon, tone: "warning" };
+  }
+  if (name === "claude-code.tool.execution") {
+    return { kind: "execution", label: "Execution", Icon: PlayIcon, tone: "neutral" };
+  }
+  if (name.startsWith("claude-code.tool.")) {
+    const tool = name.slice("claude-code.tool.".length) || span.tool || "Tool";
+    return { kind: "tool", label: tool, Icon: toolIcon(tool), tone: "neutral" };
+  }
+
   // GitHub Copilot / OTel gen_ai span types (label carried in the span name)
   if (genOp === "chat" || name.startsWith("chat ")) {
     return { kind: "llm", label: span.model || afterPrefix(name, "chat ") || "chat", Icon: ChatIcon, tone: "info" };

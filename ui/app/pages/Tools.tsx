@@ -8,6 +8,7 @@ import { Heading, Text } from "@dynatrace/strato-components/typography";
 import { Sheet } from "@dynatrace/strato-components/overlays";
 import { Button } from "@dynatrace/strato-components/buttons";
 import { ProgressCircle } from "@dynatrace/strato-components/content";
+import { TextInput } from "@dynatrace/strato-components/forms";
 import { CodeIcon } from "@dynatrace/strato-icons";
 
 import { Section } from "../components/Section";
@@ -15,6 +16,7 @@ import { QueryState } from "../components/QueryState";
 import { toneColor, subduedText } from "../components/tokens";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtDuration, fmtTime } from "../data/normalize";
+import { isPersonalEmail } from "../data/config";
 import { toolUsageQuery, toolSessionsQuery, skillLogsQuery } from "../data/queries";
 import { toolIcon, type IconType } from "../data/taskKind";
 import { SessionDetail } from "./SessionDetail";
@@ -40,8 +42,8 @@ function userOf(r: Rec): string {
   return String(r.name || r.email || "(unknown)");
 }
 function deptOf(r: Rec): string {
-  const email = String(r.email ?? "").toLowerCase();
-  if (email && !email.includes("@dynatrace.com")) return "Personal Account";
+  const email = String(r.email ?? "");
+  if (isPersonalEmail(email)) return "Personal Account";
   return String(r.dept || "Unmapped / Pilot");
 }
 
@@ -117,27 +119,41 @@ function skillSessions(logs: Rec[], skill: string): SkillSession[] {
 export const Tools = () => {
   const toolUsage = useTimeframedDql(toolUsageQuery());
   const skillLogs = useTimeframedDql(skillLogsQuery());
+  const [search, setSearch] = useState("");
   // The active drill-down (a tool or skill). Stays set while its sessions sheet
   // or a session opened from it is showing, so prev/next has the full list.
   const [drill, setDrill] = useState<{ type: "tool" | "skill"; name: string } | null>(null);
 
   const skillLogRecords = (skillLogs.data?.records ?? []) as Rec[];
-  const skills = useMemo(() => aggregateSkills(skillLogRecords), [skillLogRecords]);
+  const allSkills = useMemo(() => aggregateSkills(skillLogRecords), [skillLogRecords]);
+
+  const term = search.trim().toLowerCase();
+  const skills = useMemo(
+    () => (term ? allSkills.filter((s) => s.skill.toLowerCase().includes(term)) : allSkills),
+    [allSkills, term],
+  );
 
   return (
     <Flex flexDirection="column" gap={20} padding={24} style={{ maxWidth: 1400, margin: "0 auto" }}>
-      <Flex flexDirection="column" gap={2}>
-        <Heading level={2} style={{ margin: 0 }}>Skills &amp; Tools</Heading>
-        <Text style={{ color: subduedText }}>
-          Which skills and tools your developers use most. Select a row to see the sessions using it.
-        </Text>
+      <Flex justifyContent="space-between" alignItems="flex-end" gap={12} flexFlow="wrap">
+        <Flex flexDirection="column" gap={2}>
+          <Heading level={2} style={{ margin: 0 }}>Skills &amp; Tools</Heading>
+          <Text style={{ color: subduedText }}>
+            Which skills and tools your developers use most. Select a row to see the sessions using it.
+          </Text>
+        </Flex>
+        <div style={{ minWidth: 240 }}>
+          <TextInput value={search} onChange={(v) => setSearch(v)} placeholder="Search skills &amp; tools…" />
+        </div>
       </Flex>
 
       <Section title="Skills" subtitle="Agent skills invoked via the Skill tool (Claude Code).">
         <QueryState result={skillLogs} minHeight={80} empty={<Text style={{ color: subduedText }}>No skill invocations in this timeframe.</Text>}>
           {() =>
             skills.length === 0 ? (
-              <Text style={{ color: subduedText }}>No skill invocations in this timeframe.</Text>
+              <Text style={{ color: subduedText }}>
+                {term ? "No skills match the current search." : "No skill invocations in this timeframe."}
+              </Text>
             ) : (
               <UsageTable
                 rows={skills.map((s) => ({
@@ -159,24 +175,31 @@ export const Tools = () => {
 
       <Section title="Tools" subtitle="Tool calls across Claude Code and GitHub Copilot.">
         <QueryState result={toolUsage} minHeight={120} empty={<Text style={{ color: subduedText }}>No tool calls in this timeframe.</Text>}>
-          {(records) => (
-            <UsageTable
-              rows={(records as Rec[]).map((r) => {
-                const name = String(r.tool ?? "");
-                return {
-                  name,
-                  Icon: toolIcon(name),
-                  calls: num(r.calls),
-                  users: num(r.users),
-                  sessions: num(r.sessions),
-                  failures: num(r.failures),
-                  avgMs: num(r.avgMs),
-                  lastSeen: String(r.lastSeen ?? ""),
-                };
-              })}
-              onSelect={(name) => setDrill({ type: "tool", name })}
-            />
-          )}
+          {(records) => {
+            const filtered = (records as Rec[]).filter(
+              (r) => !term || String(r.tool ?? "").toLowerCase().includes(term),
+            );
+            return filtered.length === 0 ? (
+              <Text style={{ color: subduedText }}>No tools match the current search.</Text>
+            ) : (
+              <UsageTable
+                rows={filtered.map((r) => {
+                  const name = String(r.tool ?? "");
+                  return {
+                    name,
+                    Icon: toolIcon(name),
+                    calls: num(r.calls),
+                    users: num(r.users),
+                    sessions: num(r.sessions),
+                    failures: num(r.failures),
+                    avgMs: num(r.avgMs),
+                    lastSeen: String(r.lastSeen ?? ""),
+                  };
+                })}
+                onSelect={(name) => setDrill({ type: "tool", name })}
+              />
+            );
+          }}
         </QueryState>
       </Section>
 

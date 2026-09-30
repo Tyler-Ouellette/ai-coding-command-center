@@ -5,6 +5,7 @@
 import { useMemo } from "react";
 import { useDql } from "@dynatrace-sdk/react-hooks";
 import { useTimeframe } from "./timeframe";
+import { useSettings } from "./settings";
 
 const FALLBACK_START = new Date(Date.now() - 7 * 86_400_000).toISOString();
 
@@ -13,6 +14,9 @@ export function useTimeframedDql(
   options?: { enabled?: boolean; staleTime?: number; runInBackground?: boolean },
 ) {
   const { tf } = useTimeframe();
+  // Subscribe to settings so a corporate-domain change re-renders the caller,
+  // which rebuilds its `query` string via base() with the new predicate.
+  useSettings();
   const { start, end } = useMemo(
     () => ({
       start: tf?.from?.absoluteDate ?? FALLBACK_START,

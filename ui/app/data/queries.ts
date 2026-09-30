@@ -65,12 +65,16 @@ export function sessionsQuery(extraFilter?: string): string {
     user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
     uid = takeFirst(uid),
     dept = takeFirst(dept),
+    repo = takeFirst(github.copilot.git.repository),
     start = min(start_time), end = max(end_time),
     interactions = countIf(is_interaction),
     llm = countIf(is_llm),
     tools = countIf(is_tool),
     blocked = countIf(is_blocked),
     errors = countIf(is_llm and success == false),
+    shadow = countIf(is_llm and is_personal),
+    toolNames = collectDistinct(coalesce(tool_name, \`tool.name\`)),
+    prompts = collectDistinct(coalesce(user_prompt, \`prompt.preview\`)),
     inTok = sum(toLong(inp)), outTok = sum(toLong(outp)),
     crTok = sum(toLong(cr)), ccTok = sum(toLong(cc)),
     cost = sum(cost)
@@ -86,16 +90,18 @@ export function sessionSpansQuery(sessionId: string): string {
 | filter \`session.id\` == "${q(sessionId)}"
 | fields
     spanId = span.id, parent = span.parent_id, name = span.name,
-    tool = tool_name, cmd = full_command, args = gen_ai.tool.call.arguments,
+    tool = coalesce(tool_name, \`tool.name\`), cmd = full_command, args = gen_ai.tool.call.arguments,
+    toolOutputPreview = \`tool.output.preview\`,
     toolUseId = coalesce(tool_use_id, gen_ai.tool.call.id), model,
     inTok = toLong(inp), outTok = toLong(outp), crTok = toLong(cr), ccTok = toLong(cc), cost,
     ttft = ttft_ms, success, attempt,
-    seq = interaction.sequence, prompt = user_prompt, promptLen = user_prompt_length,
+    seq = interaction.sequence, prompt = coalesce(user_prompt, \`prompt.preview\`), promptLen = user_prompt_length,
     userRequest = copilot_chat.user_request,
     durMs = coalesce(duration_ms, interaction.duration_ms),
     start = start_time, end = end_time, traceId = toString(trace.id),
     assistant, genOp = gen_ai.operation.name, agent = gen_ai.agent.name,
-    repo = github.copilot.git.repository, branch = github.copilot.git.branch
+    repo = github.copilot.git.repository, branch = github.copilot.git.branch,
+    is_llm, is_personal
 | sort start asc
 | limit 5000`;
 }
@@ -432,4 +438,38 @@ export function llmRetryDetailQuery(): string {
 | fieldsAdd who = coalesce(user.email, user.name, "(unknown)")
 | summarize retries = count(), sessions = countDistinct(\`session.id\`), users = countDistinct(who), by:{model}
 | sort retries desc`;
+}
+
+// Shadow AI (LLM calls from personal accounts). One row per session, since 371
+// individual model calls collapse into a handful of sessions from personal users.
+export function shadowAICallsQuery(): string {
+  return `${base()}
+| filter is_llm and is_personal
+| summarize {
+    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    uid = takeFirst(uid),
+    assistant = takeFirst(assistant),
+    models = countDistinct(model),
+    calls = count(),
+    start = min(start_time), end = max(end_time),
+    inTok = sum(toLong(inp)), outTok = sum(toLong(outp)),
+    crTok = sum(toLong(cr)), ccTok = sum(toLong(cc)),
+    cost = sum(cost)
+  }, by:{\`session.id\`}
+| fieldsRename sessionId = \`session.id\`
+| sort calls desc
+| limit 1000`;
+}
+
+export function shadowAIStatsQuery(): string {
+  return `${base()}
+| filter is_llm and is_personal
+| summarize {
+    totalCalls = count(),
+    uniqueSessions = countDistinct(\`session.id\`),
+    uniqueUsers = countDistinct(uid),
+    totalCost = sum(cost),
+    inTok = sum(toLong(inp)), outTok = sum(toLong(outp)),
+    crTok = sum(toLong(cr)), ccTok = sum(toLong(cc))
+  }`;
 }
