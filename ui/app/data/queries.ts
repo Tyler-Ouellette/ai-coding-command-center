@@ -4,6 +4,14 @@
 // defaultTimeframeStart/defaultTimeframeEnd (see data/timeframe.tsx).
 
 import { base } from "./normalize";
+import {
+  SECRET_PATTERNS,
+  CREDENTIAL_PATTERNS,
+  DESTRUCTIVE_PATTERNS,
+  JAILBREAK_PATTERNS,
+  dqlMatchesAny,
+  dqlContextLabelExpr,
+} from "./securityPatterns";
 
 /** Escape a value interpolated into a DQL double-quoted string literal. */
 function q(v: string): string {
@@ -262,20 +270,25 @@ export function userToolMixQuery(uid: string): string {
 // governance flags, per department.
 // ---------------------------------------------------------------------------
 
-export function securityByDeptQuery(): string {
-  return `${base()}
+// Shared `fieldsAdd` prelude for both security queries below: normalizes the
+// tool-call/command text (`cmd_args`) and the prompt text across both
+// assistants' fields (`req_lower`), then unions them into `hay_secret` so
+// the secrets flag covers "any tool input or prompt chunk" per FEATURES.md,
+// not just the prompt.
+const SECURITY_PRELUDE = `
 | fieldsAdd
     is_terminal = (gen_ai.tool.name == "run_in_terminal" or tool_name == "Bash"),
     cmd_args = lower(coalesce(gen_ai.tool.call.arguments, full_command, "")),
-    req_lower = if(isNotNull(copilot_chat.user_request), lower(copilot_chat.user_request), else: "")
-| parse req_lower, "LD 'ghp_' (ALNUM{30,40}:ghK) LD"
-| parse req_lower, "LD 'sk-' (ALNUM{40,}:oaK) LD"
-| parse req_lower, "LD 'akia' (ALNUM{16}:awsK) LD"
+    req_lower = lower(coalesce(copilot_chat.user_request, user_prompt, \`prompt.preview\`, "")),
+    hay_secret = concat(req_lower, "\\n", cmd_args)`;
+
+export function securityByDeptQuery(): string {
+  return `${base()}${SECURITY_PRELUDE}
 | fieldsAdd
-    flag_secret = (req_lower != "" and (isNotNull(ghK) or isNotNull(oaK) or isNotNull(awsK) or contains(req_lower, "sk-ant-api03-") or (contains(req_lower, "-----begin") and contains(req_lower, "private key")))),
-    flag_destr = (is_terminal and (matchesValue(cmd_args, "rm -rf*") or contains(cmd_args, "sudo rm -rf") or contains(cmd_args, "&& rm -rf") or contains(cmd_args, "; rm -rf") or matchesValue(cmd_args, "chmod 777*") or contains(cmd_args, "mkfs") or contains(cmd_args, "dd if="))),
-    flag_cred = (contains(cmd_args, "id_rsa") or contains(cmd_args, "id_ed25519") or contains(cmd_args, ".pem") or contains(cmd_args, ".ssh/") or contains(cmd_args, ".aws/credentials") or contains(cmd_args, "private_key")),
-    flag_jail = (req_lower != "" and (contains(req_lower, "ignore all previous instruction") or contains(req_lower, "reveal your system prompt") or contains(req_lower, "do anything now") or contains(req_lower, "bypass your"))),
+    flag_secret = ${dqlMatchesAny("hay_secret", SECRET_PATTERNS)},
+    flag_destr = (is_terminal and ${dqlMatchesAny("cmd_args", DESTRUCTIVE_PATTERNS)}),
+    flag_cred = ${dqlMatchesAny("cmd_args", CREDENTIAL_PATTERNS)},
+    flag_jail = ${dqlMatchesAny("req_lower", JAILBREAK_PATTERNS)},
     flag_shadow = (is_llm and is_personal)
 | summarize {
     secrets = countIf(flag_secret),
@@ -291,29 +304,26 @@ export function securityByDeptQuery(): string {
 /** Per-session breakdown for a specific security flag. */
 export function securityFlagDetailQuery(flagKey: "secrets" | "destructive" | "credential" | "jailbreak" | "shadow"): string {
   const flagExpr: Record<string, string> = {
-    secrets: `(req_lower != "" and (isNotNull(ghK) or isNotNull(oaK) or isNotNull(awsK) or contains(req_lower, "sk-ant-api03-") or (contains(req_lower, "-----begin") and contains(req_lower, "private key"))))`,
-    destructive: `(is_terminal and (matchesValue(cmd_args, "rm -rf*") or contains(cmd_args, "sudo rm -rf") or contains(cmd_args, "&& rm -rf") or contains(cmd_args, "; rm -rf") or matchesValue(cmd_args, "chmod 777*") or contains(cmd_args, "mkfs") or contains(cmd_args, "dd if=")))`,
-    credential: `(contains(cmd_args, "id_rsa") or contains(cmd_args, "id_ed25519") or contains(cmd_args, ".pem") or contains(cmd_args, ".ssh/") or contains(cmd_args, ".aws/credentials") or contains(cmd_args, "private_key"))`,
-    jailbreak: `(req_lower != "" and (contains(req_lower, "ignore all previous instruction") or contains(req_lower, "reveal your system prompt") or contains(req_lower, "do anything now") or contains(req_lower, "bypass your")))`,
+    secrets: dqlMatchesAny("hay_secret", SECRET_PATTERNS),
+    destructive: `(is_terminal and ${dqlMatchesAny("cmd_args", DESTRUCTIVE_PATTERNS)})`,
+    credential: dqlMatchesAny("cmd_args", CREDENTIAL_PATTERNS),
+    jailbreak: dqlMatchesAny("req_lower", JAILBREAK_PATTERNS),
     shadow: `(is_llm and is_personal)`,
   };
-  // Extra context field per flag type
+  // Extra context field per flag type. `secrets`/`credential` show which
+  // pattern matched (a label, e.g. "GitHub token") rather than the raw
+  // command/prompt text — echoing the raw text for `credential` would leak
+  // the literal Authorization header/credential value the flag exists to
+  // catch.
   const contextField: Record<string, string> = {
-    secrets: `context = if(isNotNull(ghK), "GitHub token", else: if(isNotNull(oaK), "OpenAI key", else: if(isNotNull(awsK), "AWS key", else: "Secret pattern")))`,
+    secrets: `context = ${dqlContextLabelExpr("hay_secret", SECRET_PATTERNS, "Secret pattern")}`,
     destructive: `context = coalesce(full_command, gen_ai.tool.call.arguments, "")`,
-    credential: `context = coalesce(full_command, gen_ai.tool.call.arguments, "")`,
+    credential: `context = ${dqlContextLabelExpr("cmd_args", CREDENTIAL_PATTERNS, "Credential access")}`,
     jailbreak: `context = if(isNotNull(copilot_chat.user_request), substring(copilot_chat.user_request, from:0, to:120), else: "")`,
     shadow: `context = coalesce(user.email, user.name, "")`,
   };
 
-  return `${base()}
-| fieldsAdd
-    is_terminal = (gen_ai.tool.name == "run_in_terminal" or tool_name == "Bash"),
-    cmd_args = lower(coalesce(gen_ai.tool.call.arguments, full_command, "")),
-    req_lower = if(isNotNull(copilot_chat.user_request), lower(copilot_chat.user_request), else: "")
-| parse req_lower, "LD 'ghp_' (ALNUM{30,40}:ghK) LD"
-| parse req_lower, "LD 'sk-' (ALNUM{40,}:oaK) LD"
-| parse req_lower, "LD 'akia' (ALNUM{16}:awsK) LD"
+  return `${base()}${SECURITY_PRELUDE}
 | fieldsAdd flag = ${flagExpr[flagKey]}, ${contextField[flagKey]}
 | filter flag == true
 | summarize {
