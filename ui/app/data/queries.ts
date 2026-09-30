@@ -4,6 +4,15 @@
 // defaultTimeframeStart/defaultTimeframeEnd (see data/timeframe.tsx).
 
 import { base } from "./normalize";
+import {
+  SECRET_PATTERNS,
+  CREDENTIAL_PATTERNS,
+  DESTRUCTIVE_PATTERNS,
+  JAILBREAK_PATTERNS,
+  dqlMatchesAny,
+  dqlContextLabelExpr,
+} from "./securityPatterns";
+import { getOpusTrivialOutputTokens } from "./config";
 
 /** Escape a value interpolated into a DQL double-quoted string literal. */
 function q(v: string): string {
@@ -52,14 +61,65 @@ export function modelSpendQuery(): string {
 | sort spend desc`;
 }
 
+// What an Opus call would have cost at Sonnet rates, given the same token
+// counts. Mirrors the Sonnet branch of COST_EXPR in normalize.ts — kept as its
+// own expression (rather than exported from there) since every query here
+// defines its rate math inline (see SAVINGS_EXPR above).
+const SONNET_RATE_EXPR = `toDouble(fresh)*3.0/1000000 + toDouble(cr)*0.3/1000000 + toDouble(cc)*3.75/1000000 + toDouble(outp)*15.0/1000000`;
+
+/** Shared right-sizing filter/fields: Opus calls that succeeded, flagged "trivial"
+ *  when output tokens are under the configured threshold. */
+function rightSizingPrelude(): string {
+  const threshold = getOpusTrivialOutputTokens();
+  return `${base()}
+| filter is_llm == true and contains(model, "opus") and success == true
+| fieldsAdd isTrivial = toLong(outp) < ${threshold}, sonnetCost = ${SONNET_RATE_EXPR}
+| fieldsAdd savingsIfSonnet = cost - sonnetCost`;
+}
+
+/** Scalar summary for the "Model right-sizing" optimization card: how many
+ *  Opus turns had a trivial (small) output, and what they'd have cost at
+ *  Sonnet rates. An estimate — a small output doesn't prove Opus wasn't
+ *  needed, only that this is worth a look. */
+export function modelRightSizingQuery(): string {
+  return `${rightSizingPrelude()}
+| summarize {
+    trivialTurns = countIf(isTrivial),
+    totalOpusTurns = count(),
+    savings = sum(if(isTrivial, savingsIfSonnet, else: 0.0))
+  }`;
+}
+
+/** Per-session breakdown of trivial-output Opus turns, for the detail sheet. */
+export function modelRightSizingDetailQuery(): string {
+  return `${rightSizingPrelude()}
+| summarize {
+    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    dept = takeFirst(dept),
+    trivialTurns = countIf(isTrivial),
+    spend = sum(cost),
+    savings = sum(if(isTrivial, savingsIfSonnet, else: 0.0)),
+    lastSeen = max(start_time)
+  }, by:{\`session.id\`}
+| fieldsRename sessionId = \`session.id\`
+| filter trivialTurns > 0
+| sort savings desc
+| limit 200`;
+}
+
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
-/** One row per session. `extraFilter` (a bare DQL predicate) scopes it, e.g. `uid == "x"`. */
+/** One row per session. `extraFilter` (a bare DQL predicate) scopes it, e.g. `uid == "x"`.
+ *  `edits` (successful edit-type tool calls) and `activeMin` (distinct 1-minute buckets that
+ *  contain a span) are span-derived fallbacks: `edits` backstops the "nothing shipped" flag when
+ *  outcome metrics are absent, `activeMin` backstops active-time when `active_time.total` is absent.
+ *  See sessionOutcomesQuery() for the metric-backed primary source. */
 export function sessionsQuery(extraFilter?: string): string {
   const flt = extraFilter ? `\n| filter ${extraFilter}` : "";
   return `${base()}${flt}
+| fieldsAdd editTool = ${TOOL_NAME_EXPR}, minuteBucket = bin(start_time, 1m)
 | summarize {
     assistant = takeFirst(assistant),
     user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
@@ -67,9 +127,11 @@ export function sessionsQuery(extraFilter?: string): string {
     dept = takeFirst(dept),
     repo = takeFirst(github.copilot.git.repository),
     start = min(start_time), end = max(end_time),
+    activeMin = countDistinct(minuteBucket),
     interactions = countIf(is_interaction),
     llm = countIf(is_llm),
     tools = countIf(is_tool),
+    edits = countIf(is_tool and in(editTool, array("Edit","Write","MultiEdit","NotebookEdit","insert_edit_into_file","create_file","apply_patch","str_replace_editor"))),
     blocked = countIf(is_blocked),
     errors = countIf(is_llm and success == false),
     shadow = countIf(is_llm and is_personal),
@@ -82,6 +144,47 @@ export function sessionsQuery(extraFilter?: string): string {
 | fieldsRename sessionId = \`session.id\`
 | sort start desc
 | limit 1000`;
+}
+
+/**
+ * Metric-backed per-session outcomes (commits, PRs, lines changed, accepted edits, active time).
+ * These live ONLY in Claude Code's `claude_code.*` OTel metrics — never on spans/logs — so this is
+ * the sole source for them. Validated against the tenant with dtctl.
+ *
+ * Returned in LONG form — one row per (sessionId, metric, value) — and pivoted to per-session
+ * objects by outcomeMap() in ui/app/data/outcomes.ts. The long/append shape is deliberate: a single
+ * multi-aggregate `timeseries { a=…, b=… }` collapses to ZERO rows if ANY aggregate has no series in
+ * the window (verified: `pull_request.count` when no PR was opened, or a filter matching nothing,
+ * nulls out the entire result). Emitting each metric as its own single-aggregate `timeseries` and
+ * unioning them with `append` avoids that — an empty metric just contributes no rows. `arraySum`
+ * collapses each per-bucket timeseries array to a scalar total across the app-injected timeframe.
+ *
+ * If no `claude_code.*` metrics are ingested, this returns zero rows and callers fall back to the
+ * span-derived signals on sessionsQuery (`edits`, `activeMin`). See docs/claude-code-telemetry.md.
+ */
+export function sessionOutcomesQuery(sessionId?: string): string {
+  const branch = (label: string, agg: string) =>
+    `timeseries v = ${agg}, by:{ \`session.id\` }\n` +
+    `| fieldsAdd v = arraySum(v), metric = "${label}"\n` +
+    `| fields sessionId = \`session.id\`, metric, v`;
+  const branches = [
+    branch("commits", "sum(claude_code.commit.count)"),
+    branch("prs", "sum(claude_code.pull_request.count)"),
+    branch("activeSec", "sum(claude_code.active_time.total)"),
+    branch("linesAdded", `sum(claude_code.lines_of_code.count, filter: { type == "added" })`),
+    branch("linesRemoved", `sum(claude_code.lines_of_code.count, filter: { type == "removed" })`),
+    branch("editsAccepted", `sum(claude_code.code_edit_tool.decision, filter: { decision == "accept" })`),
+  ];
+  const scope = sessionId ? `\n| filter sessionId == "${q(sessionId)}"` : "";
+  return (
+    branches[0] +
+    "\n" +
+    branches
+      .slice(1)
+      .map((b) => `| append [ ${b} ]`)
+      .join("\n") +
+    `\n| filter isNotNull(v) and v > 0${scope}\n| limit 6000`
+  );
 }
 
 /** All spans in one session, flattened — the client rebuilds the tree from parent/id. */
@@ -262,20 +365,25 @@ export function userToolMixQuery(uid: string): string {
 // governance flags, per department.
 // ---------------------------------------------------------------------------
 
-export function securityByDeptQuery(): string {
-  return `${base()}
+// Shared `fieldsAdd` prelude for both security queries below: normalizes the
+// tool-call/command text (`cmd_args`) and the prompt text across both
+// assistants' fields (`req_lower`), then unions them into `hay_secret` so
+// the secrets flag covers "any tool input or prompt chunk" per FEATURES.md,
+// not just the prompt.
+const SECURITY_PRELUDE = `
 | fieldsAdd
     is_terminal = (gen_ai.tool.name == "run_in_terminal" or tool_name == "Bash"),
     cmd_args = lower(coalesce(gen_ai.tool.call.arguments, full_command, "")),
-    req_lower = if(isNotNull(copilot_chat.user_request), lower(copilot_chat.user_request), else: "")
-| parse req_lower, "LD 'ghp_' (ALNUM{30,40}:ghK) LD"
-| parse req_lower, "LD 'sk-' (ALNUM{40,}:oaK) LD"
-| parse req_lower, "LD 'akia' (ALNUM{16}:awsK) LD"
+    req_lower = lower(coalesce(copilot_chat.user_request, user_prompt, \`prompt.preview\`, "")),
+    hay_secret = concat(req_lower, "\\n", cmd_args)`;
+
+export function securityByDeptQuery(): string {
+  return `${base()}${SECURITY_PRELUDE}
 | fieldsAdd
-    flag_secret = (req_lower != "" and (isNotNull(ghK) or isNotNull(oaK) or isNotNull(awsK) or contains(req_lower, "sk-ant-api03-") or (contains(req_lower, "-----begin") and contains(req_lower, "private key")))),
-    flag_destr = (is_terminal and (matchesValue(cmd_args, "rm -rf*") or contains(cmd_args, "sudo rm -rf") or contains(cmd_args, "&& rm -rf") or contains(cmd_args, "; rm -rf") or matchesValue(cmd_args, "chmod 777*") or contains(cmd_args, "mkfs") or contains(cmd_args, "dd if="))),
-    flag_cred = (contains(cmd_args, "id_rsa") or contains(cmd_args, "id_ed25519") or contains(cmd_args, ".pem") or contains(cmd_args, ".ssh/") or contains(cmd_args, ".aws/credentials") or contains(cmd_args, "private_key")),
-    flag_jail = (req_lower != "" and (contains(req_lower, "ignore all previous instruction") or contains(req_lower, "reveal your system prompt") or contains(req_lower, "do anything now") or contains(req_lower, "bypass your"))),
+    flag_secret = ${dqlMatchesAny("hay_secret", SECRET_PATTERNS)},
+    flag_destr = (is_terminal and ${dqlMatchesAny("cmd_args", DESTRUCTIVE_PATTERNS)}),
+    flag_cred = ${dqlMatchesAny("cmd_args", CREDENTIAL_PATTERNS)},
+    flag_jail = ${dqlMatchesAny("req_lower", JAILBREAK_PATTERNS)},
     flag_shadow = (is_llm and is_personal)
 | summarize {
     secrets = countIf(flag_secret),
@@ -291,29 +399,26 @@ export function securityByDeptQuery(): string {
 /** Per-session breakdown for a specific security flag. */
 export function securityFlagDetailQuery(flagKey: "secrets" | "destructive" | "credential" | "jailbreak" | "shadow"): string {
   const flagExpr: Record<string, string> = {
-    secrets: `(req_lower != "" and (isNotNull(ghK) or isNotNull(oaK) or isNotNull(awsK) or contains(req_lower, "sk-ant-api03-") or (contains(req_lower, "-----begin") and contains(req_lower, "private key"))))`,
-    destructive: `(is_terminal and (matchesValue(cmd_args, "rm -rf*") or contains(cmd_args, "sudo rm -rf") or contains(cmd_args, "&& rm -rf") or contains(cmd_args, "; rm -rf") or matchesValue(cmd_args, "chmod 777*") or contains(cmd_args, "mkfs") or contains(cmd_args, "dd if=")))`,
-    credential: `(contains(cmd_args, "id_rsa") or contains(cmd_args, "id_ed25519") or contains(cmd_args, ".pem") or contains(cmd_args, ".ssh/") or contains(cmd_args, ".aws/credentials") or contains(cmd_args, "private_key"))`,
-    jailbreak: `(req_lower != "" and (contains(req_lower, "ignore all previous instruction") or contains(req_lower, "reveal your system prompt") or contains(req_lower, "do anything now") or contains(req_lower, "bypass your")))`,
+    secrets: dqlMatchesAny("hay_secret", SECRET_PATTERNS),
+    destructive: `(is_terminal and ${dqlMatchesAny("cmd_args", DESTRUCTIVE_PATTERNS)})`,
+    credential: dqlMatchesAny("cmd_args", CREDENTIAL_PATTERNS),
+    jailbreak: dqlMatchesAny("req_lower", JAILBREAK_PATTERNS),
     shadow: `(is_llm and is_personal)`,
   };
-  // Extra context field per flag type
+  // Extra context field per flag type. `secrets`/`credential` show which
+  // pattern matched (a label, e.g. "GitHub token") rather than the raw
+  // command/prompt text — echoing the raw text for `credential` would leak
+  // the literal Authorization header/credential value the flag exists to
+  // catch.
   const contextField: Record<string, string> = {
-    secrets: `context = if(isNotNull(ghK), "GitHub token", else: if(isNotNull(oaK), "OpenAI key", else: if(isNotNull(awsK), "AWS key", else: "Secret pattern")))`,
+    secrets: `context = ${dqlContextLabelExpr("hay_secret", SECRET_PATTERNS, "Secret pattern")}`,
     destructive: `context = coalesce(full_command, gen_ai.tool.call.arguments, "")`,
-    credential: `context = coalesce(full_command, gen_ai.tool.call.arguments, "")`,
+    credential: `context = ${dqlContextLabelExpr("cmd_args", CREDENTIAL_PATTERNS, "Credential access")}`,
     jailbreak: `context = if(isNotNull(copilot_chat.user_request), substring(copilot_chat.user_request, from:0, to:120), else: "")`,
     shadow: `context = coalesce(user.email, user.name, "")`,
   };
 
-  return `${base()}
-| fieldsAdd
-    is_terminal = (gen_ai.tool.name == "run_in_terminal" or tool_name == "Bash"),
-    cmd_args = lower(coalesce(gen_ai.tool.call.arguments, full_command, "")),
-    req_lower = if(isNotNull(copilot_chat.user_request), lower(copilot_chat.user_request), else: "")
-| parse req_lower, "LD 'ghp_' (ALNUM{30,40}:ghK) LD"
-| parse req_lower, "LD 'sk-' (ALNUM{40,}:oaK) LD"
-| parse req_lower, "LD 'akia' (ALNUM{16}:awsK) LD"
+  return `${base()}${SECURITY_PRELUDE}
 | fieldsAdd flag = ${flagExpr[flagKey]}, ${contextField[flagKey]}
 | filter flag == true
 | summarize {

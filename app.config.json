@@ -1,15 +1,18 @@
 {
   "$schema": "./.dt-app/app.config.schema.json",
-  "environmentUrl": "<tenant_url>",
+  "environmentUrl": "https://joh43990.sprint.apps.dynatracelabs.com",
   "app": {
     "name": "AI Coding Command Center",
-    "version": "0.0.19",
+    "version": "0.0.21",
     "description": "Command center for managing engineering AI coding sessions",
     "id": "my.ai.command.center",
     "scopes": [
       { "name": "storage:spans:read", "comment": "read coding-session spans" },
       { "name": "storage:logs:read", "comment": "read tool-input events for span detail" },
-      { "name": "storage:buckets:read", "comment": "resolve span buckets" }
+      { "name": "storage:metrics:read", "comment": "read metrics for session detail" },
+      { "name": "storage:buckets:read", "comment": "resolve span buckets" },
+      { "name": "state:app-states:read", "comment": "read configured corporate domains" },
+      { "name": "state:app-states:write", "comment": "persist configured corporate domains" }
     ]
   }
 }
