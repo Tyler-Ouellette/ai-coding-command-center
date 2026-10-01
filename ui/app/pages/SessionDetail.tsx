@@ -17,7 +17,8 @@ import { classifySpan, type TaskKind, type Tone } from "../data/taskKind";
 import { assistantBrandIcon } from "../components/brandIcons";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
-import { sessionSpansQuery, sessionToolInputsQuery, downstreamTraceQuery } from "../data/queries";
+import { sessionSpansQuery, sessionToolInputsQuery, downstreamTraceQuery, sessionOutcomesQuery } from "../data/queries";
+import { outcomeMap, outcomesAvailable } from "../data/outcomes";
 import { matchesAny, SECRET_PATTERNS, CREDENTIAL_PATTERNS, DESTRUCTIVE_PATTERNS, JAILBREAK_PATTERNS } from "../data/securityPatterns";
 
 type Span = Record<string, unknown>;
@@ -217,7 +218,22 @@ function resolveHighlightMatcher(
 export function SessionDetail({ sessionId, show, onDismiss, highlightKey, dismissLabel = "Close", onPrev, onNext, positionLabel, prefetchIds }: SessionDetailProps) {
   const spans = useTimeframedDql(sessionSpansQuery(sessionId), SESSION_QUERY_OPTS);
   const toolInputs = useTimeframedDql(sessionToolInputsQuery(sessionId), SESSION_QUERY_OPTS);
+  const outcomes = useTimeframedDql(sessionOutcomesQuery(sessionId));
   const records = (spans.data?.records ?? []) as Span[];
+  const outcome = outcomeMap(outcomes).get(sessionId);
+  const hasOutcomes = outcomesAvailable(outcomes);
+
+  // Active time: prefer the ingested metric; else fall back to distinct active
+  // minutes derived from the session's own spans.
+  const activeTimeMs = useMemo(() => {
+    if (outcome?.activeSec && outcome.activeSec > 0) return outcome.activeSec * 1000;
+    const minutes = new Set<number>();
+    for (const s of records) {
+      const t = new Date(String(s.start)).getTime();
+      if (!Number.isNaN(t)) minutes.add(Math.floor(t / 60000));
+    }
+    return minutes.size * 60000;
+  }, [outcome?.activeSec, records]);
   // Selection is a single span, or a collapsed group of spans.
   const [selected, setSelected] = useState<{ id: string; spans: Span[] } | null>(null);
   const [highlighted, setHighlighted] = useState(false);
@@ -321,9 +337,14 @@ export function SessionDetail({ sessionId, show, onDismiss, highlightKey, dismis
               }
             />
             <StatTile label="Duration" value={fmtDuration(summary.durationMs)} />
+            <StatTile label="Active time" value={fmtDuration(activeTimeMs)} />
             <StatTile label="Interactions" value={fmtInt(summary.interactions)} />
             <StatTile label="Tool calls" value={fmtInt(summary.tools)} />
             <StatTile label="Tokens" value={fmtTokens(summary.tokens)} />
+            <StatTile label="Lines changed" value={hasOutcomes ? `+${fmtInt(outcome?.linesAdded ?? 0)} / −${fmtInt(outcome?.linesRemoved ?? 0)}` : "–"} />
+            <StatTile label="Commits" value={hasOutcomes ? fmtInt(outcome?.commits ?? 0) : "–"} />
+            <StatTile label="PRs" value={hasOutcomes ? fmtInt(outcome?.prs ?? 0) : "–"} />
+            <StatTile label="Edits accepted" value={hasOutcomes ? fmtInt(outcome?.editsAccepted ?? 0) : "–"} />
             <StatTile label="Est. spend" value={fmtUSD(summary.cost)} tone="primary" />
           </Flex>
           {summary.repo ? (

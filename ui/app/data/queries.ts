@@ -12,6 +12,7 @@ import {
   dqlMatchesAny,
   dqlContextLabelExpr,
 } from "./securityPatterns";
+import { getOpusTrivialOutputTokens } from "./config";
 
 /** Escape a value interpolated into a DQL double-quoted string literal. */
 function q(v: string): string {
@@ -60,14 +61,65 @@ export function modelSpendQuery(): string {
 | sort spend desc`;
 }
 
+// What an Opus call would have cost at Sonnet rates, given the same token
+// counts. Mirrors the Sonnet branch of COST_EXPR in normalize.ts — kept as its
+// own expression (rather than exported from there) since every query here
+// defines its rate math inline (see SAVINGS_EXPR above).
+const SONNET_RATE_EXPR = `toDouble(fresh)*3.0/1000000 + toDouble(cr)*0.3/1000000 + toDouble(cc)*3.75/1000000 + toDouble(outp)*15.0/1000000`;
+
+/** Shared right-sizing filter/fields: Opus calls that succeeded, flagged "trivial"
+ *  when output tokens are under the configured threshold. */
+function rightSizingPrelude(): string {
+  const threshold = getOpusTrivialOutputTokens();
+  return `${base()}
+| filter is_llm == true and contains(model, "opus") and success == true
+| fieldsAdd isTrivial = toLong(outp) < ${threshold}, sonnetCost = ${SONNET_RATE_EXPR}
+| fieldsAdd savingsIfSonnet = cost - sonnetCost`;
+}
+
+/** Scalar summary for the "Model right-sizing" optimization card: how many
+ *  Opus turns had a trivial (small) output, and what they'd have cost at
+ *  Sonnet rates. An estimate — a small output doesn't prove Opus wasn't
+ *  needed, only that this is worth a look. */
+export function modelRightSizingQuery(): string {
+  return `${rightSizingPrelude()}
+| summarize {
+    trivialTurns = countIf(isTrivial),
+    totalOpusTurns = count(),
+    savings = sum(if(isTrivial, savingsIfSonnet, else: 0.0))
+  }`;
+}
+
+/** Per-session breakdown of trivial-output Opus turns, for the detail sheet. */
+export function modelRightSizingDetailQuery(): string {
+  return `${rightSizingPrelude()}
+| summarize {
+    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    dept = takeFirst(dept),
+    trivialTurns = countIf(isTrivial),
+    spend = sum(cost),
+    savings = sum(if(isTrivial, savingsIfSonnet, else: 0.0)),
+    lastSeen = max(start_time)
+  }, by:{\`session.id\`}
+| fieldsRename sessionId = \`session.id\`
+| filter trivialTurns > 0
+| sort savings desc
+| limit 200`;
+}
+
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
-/** One row per session. `extraFilter` (a bare DQL predicate) scopes it, e.g. `uid == "x"`. */
+/** One row per session. `extraFilter` (a bare DQL predicate) scopes it, e.g. `uid == "x"`.
+ *  `edits` (successful edit-type tool calls) and `activeMin` (distinct 1-minute buckets that
+ *  contain a span) are span-derived fallbacks: `edits` backstops the "nothing shipped" flag when
+ *  outcome metrics are absent, `activeMin` backstops active-time when `active_time.total` is absent.
+ *  See sessionOutcomesQuery() for the metric-backed primary source. */
 export function sessionsQuery(extraFilter?: string): string {
   const flt = extraFilter ? `\n| filter ${extraFilter}` : "";
   return `${base()}${flt}
+| fieldsAdd editTool = ${TOOL_NAME_EXPR}, minuteBucket = bin(start_time, 1m)
 | summarize {
     assistant = takeFirst(assistant),
     user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
@@ -75,9 +127,11 @@ export function sessionsQuery(extraFilter?: string): string {
     dept = takeFirst(dept),
     repo = takeFirst(github.copilot.git.repository),
     start = min(start_time), end = max(end_time),
+    activeMin = countDistinct(minuteBucket),
     interactions = countIf(is_interaction),
     llm = countIf(is_llm),
     tools = countIf(is_tool),
+    edits = countIf(is_tool and in(editTool, array("Edit","Write","MultiEdit","NotebookEdit","insert_edit_into_file","create_file","apply_patch","str_replace_editor"))),
     blocked = countIf(is_blocked),
     errors = countIf(is_llm and success == false),
     shadow = countIf(is_llm and is_personal),
@@ -90,6 +144,47 @@ export function sessionsQuery(extraFilter?: string): string {
 | fieldsRename sessionId = \`session.id\`
 | sort start desc
 | limit 1000`;
+}
+
+/**
+ * Metric-backed per-session outcomes (commits, PRs, lines changed, accepted edits, active time).
+ * These live ONLY in Claude Code's `claude_code.*` OTel metrics — never on spans/logs — so this is
+ * the sole source for them. Validated against the tenant with dtctl.
+ *
+ * Returned in LONG form — one row per (sessionId, metric, value) — and pivoted to per-session
+ * objects by outcomeMap() in ui/app/data/outcomes.ts. The long/append shape is deliberate: a single
+ * multi-aggregate `timeseries { a=…, b=… }` collapses to ZERO rows if ANY aggregate has no series in
+ * the window (verified: `pull_request.count` when no PR was opened, or a filter matching nothing,
+ * nulls out the entire result). Emitting each metric as its own single-aggregate `timeseries` and
+ * unioning them with `append` avoids that — an empty metric just contributes no rows. `arraySum`
+ * collapses each per-bucket timeseries array to a scalar total across the app-injected timeframe.
+ *
+ * If no `claude_code.*` metrics are ingested, this returns zero rows and callers fall back to the
+ * span-derived signals on sessionsQuery (`edits`, `activeMin`). See docs/claude-code-telemetry.md.
+ */
+export function sessionOutcomesQuery(sessionId?: string): string {
+  const branch = (label: string, agg: string) =>
+    `timeseries v = ${agg}, by:{ \`session.id\` }\n` +
+    `| fieldsAdd v = arraySum(v), metric = "${label}"\n` +
+    `| fields sessionId = \`session.id\`, metric, v`;
+  const branches = [
+    branch("commits", "sum(claude_code.commit.count)"),
+    branch("prs", "sum(claude_code.pull_request.count)"),
+    branch("activeSec", "sum(claude_code.active_time.total)"),
+    branch("linesAdded", `sum(claude_code.lines_of_code.count, filter: { type == "added" })`),
+    branch("linesRemoved", `sum(claude_code.lines_of_code.count, filter: { type == "removed" })`),
+    branch("editsAccepted", `sum(claude_code.code_edit_tool.decision, filter: { decision == "accept" })`),
+  ];
+  const scope = sessionId ? `\n| filter sessionId == "${q(sessionId)}"` : "";
+  return (
+    branches[0] +
+    "\n" +
+    branches
+      .slice(1)
+      .map((b) => `| append [ ${b} ]`)
+      .join("\n") +
+    `\n| filter isNotNull(v) and v > 0${scope}\n| limit 6000`
+  );
 }
 
 /** All spans in one session, flattened — the client rebuilds the tree from parent/id. */

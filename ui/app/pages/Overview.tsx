@@ -1,7 +1,7 @@
 // Overview / landing tab: engineering-health KPIs, a productivity-led
 // "needs attention" list, spend trends, and a compact security strip.
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Flex } from "@dynatrace/strato-components/layouts";
 import { Heading, Text } from "@dynatrace/strato-components/typography";
@@ -44,6 +44,7 @@ import {
   spendTimeseriesQuery,
   modelSpendQuery,
   sessionsQuery,
+  sessionOutcomesQuery,
   securityByDeptQuery,
   securityFlagDetailQuery,
   repeatedFetchesQuery,
@@ -53,9 +54,13 @@ import {
   toolFailureDetailQuery,
   llmRetryQuery,
   llmRetryDetailQuery,
+  modelRightSizingQuery,
+  modelRightSizingDetailQuery,
   toolUsageQuery,
   skillLogsQuery,
 } from "../data/queries";
+import { getOpusTrivialOutputTokens } from "../data/config";
+import { mergeOutcomes, outcomesAvailable, activeMs, shippedCount } from "../data/outcomes";
 
 export const Overview = () => {
   const navigate = useNavigate();
@@ -63,6 +68,7 @@ export const Overview = () => {
   const spendTs = useTimeframedDql(spendTimeseriesQuery());
   const modelSpend = useTimeframedDql(modelSpendQuery());
   const sessions = useTimeframedDql(sessionsQuery());
+  const outcomes = useTimeframedDql(sessionOutcomesQuery());
   const security = useTimeframedDql(securityByDeptQuery());
   const fetches = useTimeframedDql(repeatedFetchesQuery());
   const commands = useTimeframedDql(repeatedCommandsQuery());
@@ -71,8 +77,17 @@ export const Overview = () => {
   const toolFailureDetail = useTimeframedDql(toolFailureDetailQuery());
   const llmRetry = useTimeframedDql(llmRetryQuery());
   const llmRetryDetail = useTimeframedDql(llmRetryDetailQuery());
+  const rightSizing = useTimeframedDql(modelRightSizingQuery());
+  const rightSizingDetail = useTimeframedDql(modelRightSizingDetailQuery());
   const toolUsage = useTimeframedDql(toolUsageQuery());
   const skillLogs = useTimeframedDql(skillLogsQuery());
+
+  // Merge metric-backed outcomes onto span-derived session rows once; feeds both
+  // the attention list and the ROI ($ / PR) KPI tile.
+  const sessionRecords = useMemo(
+    () => mergeOutcomes(rows(sessions), outcomes),
+    [sessions.data, outcomes.data],
+  );
 
   return (
     <Flex flexDirection="column" gap={20} padding={24} style={{ maxWidth: 1400, margin: "0 auto" }}>
@@ -88,6 +103,10 @@ export const Overview = () => {
         {(records) => {
           const k = records[0] ?? {};
           const tokens = num(k.inTok) + num(k.outTok) + num(k.crTok) + num(k.ccTok);
+          const totalPrs = sessionRecords.reduce((a, r) => a + num(r.prs), 0);
+          const totalCost = num(k.cost);
+          const costPerPr =
+            outcomesAvailable(outcomes) && totalPrs > 0 ? fmtUSD(totalCost / totalPrs) : "–";
           return (
             <Flex gap={12} flexFlow="wrap">
               <StatTile label="Active users" value={fmtInt(num(k.users))} Icon={GroupIcon} onClick={() => navigate("/users")} />
@@ -97,6 +116,7 @@ export const Overview = () => {
               <StatTile label="Est. spend" value={fmtUSD(num(k.cost))} tone="primary" Icon={MoneyIcon} onClick={() => navigate("/sessions")} />
               <StatTile label="Cache savings" value={fmtUSD(num(k.savings))} tone="primary" hint="vs. uncached" Icon={DatabaseIcon} onClick={() => navigate("/sessions")} />
               <StatTile label="Avg interaction" value={fmtDuration(num(k.avgInteractionMs))} Icon={ClockIcon} onClick={() => navigate("/sessions")} />
+              <StatTile label="$ / PR" value={costPerPr} tone="primary" Icon={MoneyIcon} onClick={() => navigate("/sessions")} />
             </Flex>
           );
         }}
@@ -105,7 +125,7 @@ export const Overview = () => {
       {/* Needs attention */}
       <Section title="Needs attention" subtitle="Sessions worth a look, most urgent first.">
         <QueryState result={sessions} minHeight={80} empty={<Text>Nothing needs attention. 🎉</Text>}>
-          {(records) => <AttentionList sessions={records} />}
+          {() => <AttentionList sessions={sessionRecords} />}
         </QueryState>
       </Section>
 
@@ -119,6 +139,8 @@ export const Overview = () => {
           toolFailureDetail={toolFailureDetail}
           llmRetry={llmRetry}
           llmRetryDetail={llmRetryDetail}
+          rightSizing={rightSizing}
+          rightSizingDetail={rightSizingDetail}
         />
       </Section>
 
@@ -199,16 +221,15 @@ function buildAttention(sessions: Array<Record<string, unknown>>): AttentionItem
     const errors = num(s.errors);
     const cost = num(s.cost);
     const blocked = num(s.blocked);
-    const durMs = new Date(String(s.end)).getTime() - new Date(String(s.start)).getTime();
-    const durMin = durMs / 60000;
+    const activeMinutes = activeMs(s) / 60000;
 
     // one row per session, most severe reason wins
     if (errors > 0) {
       items.push({ sessionId, user, dept, label: "Failed LLM requests", detail: `${errors} error${errors > 1 ? "s" : ""}`, tone: "critical", Icon: CriticalIcon, severity: 100 + errors });
-    } else if (cost >= 15) {
-      items.push({ sessionId, user, dept, label: "High spend", detail: fmtUSD(cost), tone: "warning", Icon: MoneyIcon, severity: 80 + cost });
-    } else if (durMin >= 45) {
-      items.push({ sessionId, user, dept, label: "Long-running session", detail: fmtDuration(durMs), tone: "warning", Icon: ClockIcon, severity: 60 + durMin / 10 });
+    } else if (cost >= 15 && shippedCount(s) === 0) {
+      items.push({ sessionId, user, dept, label: "High spend, nothing shipped", detail: fmtUSD(cost), tone: "warning", Icon: MoneyIcon, severity: 80 + cost });
+    } else if (activeMinutes >= 45) {
+      items.push({ sessionId, user, dept, label: "Long-running session", detail: fmtDuration(activeMs(s)), tone: "warning", Icon: ClockIcon, severity: 60 + activeMinutes / 10 });
     } else if (blocked >= 40) {
       items.push({ sessionId, user, dept, label: "Heavy approval friction", detail: `${blocked} approvals`, tone: "neutral", Icon: PauseIcon, severity: 40 + blocked / 10 });
     }
@@ -516,6 +537,8 @@ function OptimizationRecs({
   toolFailureDetail,
   llmRetry,
   llmRetryDetail,
+  rightSizing,
+  rightSizingDetail,
 }: {
   fetches: DqlResultLike;
   commands: DqlResultLike;
@@ -524,9 +547,11 @@ function OptimizationRecs({
   toolFailureDetail: DqlResultLike;
   llmRetry: DqlResultLike;
   llmRetryDetail: DqlResultLike;
+  rightSizing: DqlResultLike;
+  rightSizingDetail: DqlResultLike;
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
-  const all = [fetches, commands, reads, toolHealth, llmRetry];
+  const all = [fetches, commands, reads, toolHealth, llmRetry, rightSizing];
   const anyLoading = all.some((r) => r.isLoading && (r.data?.records ?? []).length === 0);
 
   const cards: RecCard[] = [];
@@ -586,6 +611,30 @@ function OptimizationRecs({
     });
   }
 
+  // Model right-sizing: Opus turns with a trivial (small) output — an estimate
+  // of what they'd have cost at Sonnet rates.
+  const rs = rows(rightSizing)[0] ?? {};
+  const trivialTurns = num(rs.trivialTurns);
+  const rsSavings = num(rs.savings);
+  if (trivialTurns > 0 && rsSavings > 0) {
+    const threshold = getOpusTrivialOutputTokens();
+    cards.push({
+      key: "rightsizing",
+      Icon: MoneyIcon,
+      tone: "primary",
+      title: "Model right-sizing",
+      headline: fmtUSD(rsSavings),
+      sub: `${fmtInt(trivialTurns)} of ${fmtInt(num(rs.totalOpusTurns))} Opus turns had output under ${threshold} tokens — estimated Sonnet-rate savings`,
+      offenders: rows(rightSizingDetail)
+        .slice(0, 5)
+        .map((r) => ({
+          label: `${String(r.user ?? "(unknown)")}${r.dept ? ` · ${String(r.dept)}` : ""}`,
+          count: num(r.trivialTurns),
+          meta: fmtUSD(num(r.savings)),
+        })),
+    });
+  }
+
   if (cards.length === 0) {
     if (anyLoading) {
       return (
@@ -604,6 +653,7 @@ function OptimizationRecs({
     reads,
     failures: toolFailureDetail,
     retries: llmRetryDetail,
+    rightsizing: rightSizingDetail,
   };
   const countKeys: Record<string, string> = { fetches: "fetches", commands: "runs", reads: "reads" };
 
@@ -734,6 +784,28 @@ function RecDetailSheet({
                 </Flex>
               );
             })}
+          </Flex>
+        ) : card.key === "rightsizing" ? (
+          /* Model right-sizing: trivial-output Opus turns by session */
+          <Flex flexDirection="column" gap={0}>
+            <Flex gap={8} padding={8} style={{ borderBottom: "1px solid var(--dt-colors-border-neutral-default, rgba(255,255,255,0.1))" }}>
+              <Text style={{ minWidth: 160, fontSize: 11, color: subduedText, fontWeight: 600 }}>USER</Text>
+              <Text style={{ minWidth: 120, fontSize: 11, color: subduedText, fontWeight: 600 }}>DEPT</Text>
+              <Text style={{ fontSize: 11, color: subduedText, fontWeight: 600, minWidth: 80, textAlign: "right" }}>TRIVIAL TURNS</Text>
+              <Text style={{ fontSize: 11, color: subduedText, fontWeight: 600, minWidth: 90, textAlign: "right" }}>ACTUAL SPEND</Text>
+              <Text style={{ fontSize: 11, color: subduedText, fontWeight: 600, minWidth: 80, textAlign: "right" }}>SAVINGS</Text>
+              <Text style={{ fontSize: 11, color: subduedText, fontWeight: 600, minWidth: 140, textAlign: "right" }}>LAST SEEN</Text>
+            </Flex>
+            {recs.map((r, i) => (
+              <Flex key={i} gap={8} padding={8} style={{ borderBottom: "1px solid var(--dt-colors-border-neutral-default, rgba(255,255,255,0.06))" }}>
+                <Text style={{ minWidth: 160, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(r.user ?? "(unknown)")}</Text>
+                <Text style={{ minWidth: 120, fontSize: 12, color: subduedText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(r.dept ?? "")}</Text>
+                <Text style={{ fontSize: 12, minWidth: 80, textAlign: "right", fontWeight: 600 }}>{fmtInt(num(r.trivialTurns))}</Text>
+                <Text style={{ fontSize: 12, color: subduedText, minWidth: 90, textAlign: "right" }}>{fmtUSD(num(r.spend))}</Text>
+                <Text style={{ fontSize: 12, color: toneColor("primary"), minWidth: 80, textAlign: "right", fontWeight: 600 }}>{fmtUSD(num(r.savings))}</Text>
+                <Text style={{ fontSize: 11, color: subduedText, minWidth: 140, textAlign: "right", whiteSpace: "nowrap" }}>{fmtTime(String(r.lastSeen))}</Text>
+              </Flex>
+            ))}
           </Flex>
         ) : (
           /* LLM retries by model */

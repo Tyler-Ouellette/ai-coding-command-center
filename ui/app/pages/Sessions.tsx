@@ -14,8 +14,9 @@ import { Section } from "../components/Section";
 import { QueryState } from "../components/QueryState";
 import { toneColor, subduedText } from "../components/tokens";
 import { useTimeframedDql, num } from "../data/useQuery";
-import { fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
-import { sessionsQuery } from "../data/queries";
+import { fmtTokens, fmtUSD, fmtDuration, fmtTime, fmtInt } from "../data/normalize";
+import { sessionsQuery, sessionOutcomesQuery } from "../data/queries";
+import { mergeOutcomes, outcomesAvailable, activeMs } from "../data/outcomes";
 import { assistantBrandIcon } from "../components/brandIcons";
 import { CenterCell } from "../components/CenterCell";
 import { FilterSelect } from "../components/FilterSelect";
@@ -47,6 +48,7 @@ function searchBlob(r: Record<string, unknown>): string {
 
 export const Sessions = () => {
   const sessions = useTimeframedDql(sessionsQuery());
+  const outcomes = useTimeframedDql(sessionOutcomesQuery());
   const [params, setParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const tableRef = useRef<DataTableRef>(null);
@@ -63,7 +65,10 @@ export const Sessions = () => {
     if (deepLink) setSelectedId(deepLink);
   }, [deepLink]);
 
-  const allRows = (sessions.data?.records ?? []) as Array<Record<string, unknown>>;
+  const allRows = useMemo(
+    () => mergeOutcomes((sessions.data?.records ?? []) as Array<Record<string, unknown>>, outcomes),
+    [sessions.data, outcomes.data],
+  );
 
   const assistantOptions = useMemo(
     () => Array.from(new Set(allRows.map((r) => String(r.assistant ?? "")).filter(Boolean))).sort(),
@@ -99,7 +104,7 @@ export const Sessions = () => {
         ),
         width: 140,
       },
-      { id: "user", header: "User", accessor: (r: Record<string, unknown>) => String(r.user ?? "(unknown)"), width: "1fr" as const },
+      { id: "user", header: "User", accessor: (r: Record<string, unknown>) => String(r.user ?? "(unknown)"), width: "1fr" as const, minWidth: 180 },
       { id: "dept", header: "Department", accessor: (r: Record<string, unknown>) => String(r.dept ?? ""), width: 160 },
       {
         id: "start",
@@ -113,6 +118,14 @@ export const Sessions = () => {
         id: "duration",
         header: "Duration",
         accessor: (r: Record<string, unknown>) => durationOf(r),
+        cell: ({ value }: { value: number }) => <CenterCell>{fmtDuration(value)}</CenterCell>,
+        sortType: "number" as const,
+        width: 100,
+      },
+      {
+        id: "active",
+        header: "Active",
+        accessor: (r: Record<string, unknown>) => activeMs(r),
         cell: ({ value }: { value: number }) => <CenterCell>{fmtDuration(value)}</CenterCell>,
         sortType: "number" as const,
         width: 100,
@@ -136,6 +149,28 @@ export const Sessions = () => {
         width: 100,
       },
       {
+        id: "lines",
+        header: "Lines",
+        accessor: (r: Record<string, unknown>) => num(r.linesAdded) + num(r.linesRemoved),
+        cell: ({ rowData }: { rowData: Record<string, unknown> }) =>
+          !outcomesAvailable(outcomes) ? (
+            <CenterCell>–</CenterCell>
+          ) : (
+            <CenterCell>{`+${fmtInt(num(rowData.linesAdded))} / −${fmtInt(num(rowData.linesRemoved))}`}</CenterCell>
+          ),
+        sortType: "number" as const,
+        width: 120,
+      },
+      {
+        id: "commits",
+        header: "Commits",
+        accessor: (r: Record<string, unknown>) => num(r.commits),
+        cell: ({ value }: { value: number }) =>
+          !outcomesAvailable(outcomes) ? <CenterCell>–</CenterCell> : <CenterCell>{fmtInt(value)}</CenterCell>,
+        sortType: "number" as const,
+        width: 80,
+      },
+      {
         id: "status",
         header: "Status",
         accessor: (r: Record<string, unknown>) => num(r.errors),
@@ -152,7 +187,7 @@ export const Sessions = () => {
         width: 110,
       },
     ],
-    [],
+    [outcomes],
   );
 
   const close = () => {

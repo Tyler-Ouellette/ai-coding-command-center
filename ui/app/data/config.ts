@@ -12,6 +12,14 @@ export const CORPORATE_DOMAINS_STATE_KEY = "corporateDomains";
 
 let corporateDomains: string[] = [...DEFAULT_CORPORATE_DOMAINS];
 
+/** Fallback output-token threshold below which an Opus turn is flagged "trivial". */
+export const DEFAULT_OPUS_TRIVIAL_OUTPUT_TOKENS = 300;
+
+/** App State key under which the configured threshold is persisted. */
+export const OPUS_TRIVIAL_OUTPUT_TOKENS_STATE_KEY = "opusTrivialOutputTokens";
+
+let opusTrivialOutputTokens: number = DEFAULT_OPUS_TRIVIAL_OUTPUT_TOKENS;
+
 /** Trim, lowercase, strip a leading '@', and drop empties/duplicates. */
 export function normalizeDomains(domains: string[]): string[] {
   const seen = new Set<string>();
@@ -33,6 +41,15 @@ export function getCorporateDomains(): string[] {
 /** Set the in-memory domains (called by SettingsProvider). Not persisted here. */
 export function setCorporateDomainsModule(domains: string[]): void {
   corporateDomains = normalizeDomains(domains);
+}
+
+export function getOpusTrivialOutputTokens(): number {
+  return opusTrivialOutputTokens;
+}
+
+/** Set the in-memory threshold (called by SettingsProvider). Not persisted here. */
+export function setOpusTrivialOutputTokensModule(n: number): void {
+  opusTrivialOutputTokens = Number.isFinite(n) && n > 0 ? Math.round(n) : DEFAULT_OPUS_TRIVIAL_OUTPUT_TOKENS;
 }
 
 /** Escape a value interpolated into a DQL double-quoted string literal. */

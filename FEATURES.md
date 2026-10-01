@@ -1,11 +1,11 @@
 # Feature Ideas / Backlog
 
-## Outcomes & ROI
+<!-- ## Outcomes & ROI
 - **Show outcomes, not just cost.** Commits, PRs, lines changed, accepted edits — Claude Code already sends these free. Unlocks "$ per merged PR" and similar ROI metrics.
 
 ## Session Quality
 - **Active time vs elapsed.** Strip idle gaps to show real working time. That 77h session was ~45 min of actual work. Prevents skewed duration averages.
-- **Change "High spend" attention flag to "High spend, nothing shipped."** Only surface it if the session cost a lot *and* produced no observable output (no commits, no edits accepted).
+- **Change "High spend" attention flag to "High spend, nothing shipped."** Only surface it if the session cost a lot *and* produced no observable output (no commits, no edits accepted). -->
 
 ## Cost Optimization
 - **Model right-sizing recommendation.** Detect Opus turns with small output tokens (i.e., the heavy model was used for a trivial response) and show "you could have paid Sonnet rates for X of these turns — estimated savings: $Y." Appeals to a tech-savvy CFO. Note: accuracy depends on whether the task *actually* required Opus, so frame as an estimate.
