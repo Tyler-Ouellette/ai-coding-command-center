@@ -18,6 +18,7 @@ import { assistantBrandIcon } from "../components/brandIcons";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtTokens, fmtUSD, fmtDuration, fmtTime } from "../data/normalize";
 import { sessionSpansQuery, sessionToolInputsQuery, downstreamTraceQuery } from "../data/queries";
+import { matchesAny, SECRET_PATTERNS, CREDENTIAL_PATTERNS, DESTRUCTIVE_PATTERNS, JAILBREAK_PATTERNS } from "../data/securityPatterns";
 
 type Span = Record<string, unknown>;
 interface TreeNode {
@@ -146,24 +147,21 @@ function SessionPrefetch({ sessionId }: { sessionId: string }) {
 /** Per-flag span matcher used to auto-select the most relevant span on deep-link. */
 const HIGHLIGHT_MATCHERS: Record<string, (s: Span) => boolean> = {
   secrets: (s) => {
-    const prompt = `${String(s.prompt ?? "")}\n${String(s.userRequest ?? "")}`.toLowerCase();
-    return prompt.includes("ghp_") || prompt.includes("sk-") || prompt.includes("akia") ||
-      prompt.includes("sk-ant-api03-") || (prompt.includes("-----begin") && prompt.includes("private key"));
+    const hay = `${String(s.prompt ?? "")}\n${String(s.userRequest ?? "")}\n${String(s.cmd ?? s.args ?? "")}`.toLowerCase();
+    return matchesAny(SECRET_PATTERNS, hay);
   },
   destructive: (s) => {
+    const isTerminal = String(s.tool) === "Bash" || String(s.name).includes("run_in_terminal");
     const cmd = String(s.cmd ?? s.args ?? "").toLowerCase();
-    return (String(s.tool) === "Bash" || String(s.name).includes("run_in_terminal")) &&
-      (cmd.includes("rm -rf") || cmd.includes("chmod 777") || cmd.includes("mkfs") || cmd.includes("dd if="));
+    return isTerminal && matchesAny(DESTRUCTIVE_PATTERNS, cmd);
   },
   credential: (s) => {
     const cmd = String(s.cmd ?? s.args ?? "").toLowerCase();
-    return cmd.includes("id_rsa") || cmd.includes("id_ed25519") || cmd.includes(".pem") ||
-      cmd.includes(".ssh/") || cmd.includes(".aws/credentials") || cmd.includes("private_key");
+    return matchesAny(CREDENTIAL_PATTERNS, cmd);
   },
   jailbreak: (s) => {
     const prompt = `${String(s.prompt ?? "")}\n${String(s.userRequest ?? "")}`.toLowerCase();
-    return prompt.includes("ignore all previous instruction") || prompt.includes("reveal your system prompt") ||
-      prompt.includes("do anything now") || prompt.includes("bypass your");
+    return matchesAny(JAILBREAK_PATTERNS, prompt);
   },
   shadow: (s) => String(s.genOp) === "chat" || String(s.name) === "claude_code.llm_request",
 };
@@ -389,21 +387,11 @@ function classifyOf(span: Span) {
 
 /** A risk flag surfaced inline on a trace row. */
 export interface SpanWarning {
-  key: "destructive" | "secret" | "webPost";
+  key: "destructive" | "secret" | "credential" | "webPost";
   label: string;
   tone: Tone;
   Icon: TaskKind["Icon"];
 }
-
-// Specific enough to avoid flagging innocuous strings like "task-" or "risk-".
-const SECRET_RES: RegExp[] = [
-  /gh[pousr]_[A-Za-z0-9]{20,}/,
-  /sk-ant-api03-[A-Za-z0-9_-]{20,}/,
-  /\bsk-[A-Za-z0-9]{20,}/,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /xox[baprs]-[A-Za-z0-9-]{10,}/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-];
 
 /** True when a shell command or captured tool arguments issue an outbound POST. */
 function isOutboundPost(span: Span, cmdLower: string, parsed: Record<string, unknown> | null): boolean {
@@ -421,8 +409,9 @@ function isOutboundPost(span: Span, cmdLower: string, parsed: Record<string, unk
 }
 
 // Inline risk flags for a span: destructive shell commands, exposed secrets /
-// API tokens, and suspicious outbound web requests (e.g. POST). Reuses the same
-// signals as the security highlights but renders per-row in the trace.
+// API tokens, credential/file access, and suspicious outbound web requests
+// (e.g. POST). Reuses the same pattern lists as the Overview security flags
+// (ui/app/data/securityPatterns.ts) but renders per-row in the trace.
 function spanWarnings(span: Span, logInput?: string): SpanWarning[] {
   const raw = String(span.cmd ?? span.args ?? logInput ?? "");
   const prompt = `${String(span.prompt ?? "")}\n${String(span.userRequest ?? "")}`.trim();
@@ -433,14 +422,17 @@ function spanWarnings(span: Span, logInput?: string): SpanWarning[] {
   const parsed = parsedArgs(span, logInput);
   const warnings: SpanWarning[] = [];
 
-  if (isTerminal && (cmdLower.includes("rm -rf") || cmdLower.includes("chmod 777") ||
-    cmdLower.includes("mkfs") || cmdLower.includes("dd if="))) {
+  if (isTerminal && matchesAny(DESTRUCTIVE_PATTERNS, cmdLower)) {
     warnings.push({ key: "destructive", label: "Destructive command", tone: "critical", Icon: TerminalIcon });
   }
 
-  const hay = `${raw}\n${prompt}`;
-  if (SECRET_RES.some((re) => re.test(hay))) {
+  const hay = `${raw}\n${prompt}`.toLowerCase();
+  if (matchesAny(SECRET_PATTERNS, hay)) {
     warnings.push({ key: "secret", label: "Exposed API token / secret", tone: "critical", Icon: LockIcon });
+  }
+
+  if (matchesAny(CREDENTIAL_PATTERNS, cmdLower)) {
+    warnings.push({ key: "credential", label: "Credential file / auth access", tone: "warning", Icon: LockIcon });
   }
 
   if (isOutboundPost(span, cmdLower, parsed)) {
