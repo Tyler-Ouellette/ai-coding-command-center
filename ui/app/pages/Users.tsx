@@ -13,7 +13,8 @@ import { QueryState } from "../components/QueryState";
 import { subduedText } from "../components/tokens";
 import { useTimeframedDql, num } from "../data/useQuery";
 import { fmtInt, fmtTokens, fmtUSD, fmtTime } from "../data/normalize";
-import { usersQuery, departmentsQuery } from "../data/queries";
+import { usersQuery, departmentsQuery, userOutcomesQuery } from "../data/queries";
+import { mergeUserOutcomes, outcomesAvailable } from "../data/outcomes";
 import { assistantBrandIcon, AnthropicIcon, CopilotIcon } from "../components/brandIcons";
 import { CenterCell } from "../components/CenterCell";
 import { FilterSelect } from "../components/FilterSelect";
@@ -31,13 +32,17 @@ function assistantMix(r: Record<string, unknown>): string {
 export const Users = () => {
   const users = useTimeframedDql(usersQuery());
   const depts = useTimeframedDql(departmentsQuery());
+  const outcomes = useTimeframedDql(userOutcomesQuery());
   const [search, setSearch] = useState("");
   const [assistantFilter, setAssistantFilter] = useState<string>("all");
   const [deptFilter, setDeptFilter] = useState<string>("all");
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [selectedUser, setSelectedUser] = useState<string>("");
 
-  const allRows = (users.data?.records ?? []) as Array<Record<string, unknown>>;
+  const allRows = useMemo(
+    () => mergeUserOutcomes((users.data?.records ?? []) as Array<Record<string, unknown>>, outcomes),
+    [users.data, outcomes.data],
+  );
   const rows = useMemo(() => {
     const term = search.trim().toLowerCase();
     return allRows.filter((r) => {
@@ -80,6 +85,39 @@ export const Users = () => {
         width: 140,
       },
       { id: "sessions", header: "Sessions", accessor: (r: Record<string, unknown>) => num(r.sessions), sortType: "number" as const, width: 100 },
+      {
+        id: "commits",
+        header: "Commits",
+        accessor: (r: Record<string, unknown>) => num(r.commits),
+        cell: ({ value }: { value: number }) => (
+          <CenterCell>{!outcomesAvailable(outcomes) ? "–" : fmtInt(value)}</CenterCell>
+        ),
+        sortType: "number" as const,
+        width: 90,
+      },
+      {
+        id: "prs",
+        header: "PRs",
+        accessor: (r: Record<string, unknown>) => num(r.prs),
+        cell: ({ value }: { value: number }) => (
+          <CenterCell>{!outcomesAvailable(outcomes) ? "–" : fmtInt(value)}</CenterCell>
+        ),
+        sortType: "number" as const,
+        width: 70,
+      },
+      {
+        id: "lines",
+        header: "Lines",
+        accessor: (r: Record<string, unknown>) => num(r.linesAdded) + num(r.linesRemoved),
+        cell: ({ rowData }: { value: number; rowData: Record<string, unknown> }) =>
+          !outcomesAvailable(outcomes) ? (
+            <CenterCell>–</CenterCell>
+          ) : (
+            <CenterCell>{`+${fmtInt(num(rowData.linesAdded))} / −${fmtInt(num(rowData.linesRemoved))}`}</CenterCell>
+          ),
+        sortType: "number" as const,
+        width: 140,
+      },
       { id: "llm", header: "Requests", accessor: (r: Record<string, unknown>) => num(r.llm), sortType: "number" as const, width: 100 },
       {
         id: "tokens",
@@ -106,7 +144,7 @@ export const Users = () => {
         width: 150,
       },
     ],
-    [],
+    [outcomes],
   );
 
   return (

@@ -61,6 +61,49 @@ export function mergeOutcomes(
   });
 }
 
+export interface UserOutcome {
+  commits: number;
+  prs: number;
+  linesAdded: number;
+  linesRemoved: number;
+  editsAccepted: number;
+}
+
+/** uid -> per-user outcome totals, pivoted from userOutcomesQuery's long-form rows. */
+export function userOutcomeMap(result: DqlResultLike): Map<string, UserOutcome> {
+  const map = new Map<string, UserOutcome>();
+  const blank = (): UserOutcome => ({ commits: 0, prs: 0, linesAdded: 0, linesRemoved: 0, editsAccepted: 0 });
+  for (const r of result.data?.records ?? []) {
+    const id = String(r.uid ?? "");
+    const metric = String(r.metric ?? "");
+    if (!id || !metric) continue;
+    const o = map.get(id) ?? blank();
+    if (metric in o) (o as unknown as Record<string, number>)[metric] = num(r.v);
+    map.set(id, o);
+  }
+  return map;
+}
+
+/** Returns new user rows with outcome fields merged in, defaulting to 0 when absent.
+ *  Matches on uid first (which equals user.email when present), then email as fallback. */
+export function mergeUserOutcomes(
+  users: Array<Record<string, unknown>>,
+  outcomes: DqlResultLike,
+): Array<Record<string, unknown>> {
+  const map = userOutcomeMap(outcomes);
+  return users.map((u) => {
+    const o = map.get(String(u.uid ?? "")) ?? map.get(String(u.email ?? ""));
+    return {
+      ...u,
+      commits: o?.commits ?? 0,
+      prs: o?.prs ?? 0,
+      linesAdded: o?.linesAdded ?? 0,
+      linesRemoved: o?.linesRemoved ?? 0,
+      editsAccepted: o?.editsAccepted ?? 0,
+    };
+  });
+}
+
 /** Real working time in ms: the `active_time.total` metric when present, else the span-derived
  *  distinct-active-minutes fallback from sessionsQuery. */
 export function activeMs(row: Record<string, unknown>): number {

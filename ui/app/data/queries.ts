@@ -187,6 +187,36 @@ export function sessionOutcomesQuery(sessionId?: string): string {
   );
 }
 
+/**
+ * Metric-backed per-user outcome totals (commits, PRs, lines changed, accepted edits).
+ * Same append/long-form pattern as sessionOutcomesQuery but grouped by `user.email` so
+ * results join onto the user rows' `uid` / `email` fields. Returns zero rows when no
+ * `claude_code.*` metrics are ingested; callers should gate metric-only columns with
+ * outcomesAvailable().
+ */
+export function userOutcomesQuery(): string {
+  const branch = (label: string, agg: string) =>
+    `timeseries v = ${agg}, by:{ \`user.email\` }\n` +
+    `| fieldsAdd v = arraySum(v), metric = "${label}"\n` +
+    `| fields uid = \`user.email\`, metric, v`;
+  const branches = [
+    branch("commits", "sum(claude_code.commit.count)"),
+    branch("prs", "sum(claude_code.pull_request.count)"),
+    branch("linesAdded", `sum(claude_code.lines_of_code.count, filter: { type == "added" })`),
+    branch("linesRemoved", `sum(claude_code.lines_of_code.count, filter: { type == "removed" })`),
+    branch("editsAccepted", `sum(claude_code.code_edit_tool.decision, filter: { decision == "accept" })`),
+  ];
+  return (
+    branches[0] +
+    "\n" +
+    branches
+      .slice(1)
+      .map((b) => `| append [ ${b} ]`)
+      .join("\n") +
+    `\n| filter isNotNull(v) and v > 0\n| limit 3000`
+  );
+}
+
 /** All spans in one session, flattened — the client rebuilds the tree from parent/id. */
 export function sessionSpansQuery(sessionId: string): string {
   return `${base()}
