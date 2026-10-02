@@ -18,7 +18,7 @@ export function TimeframeProvider({ children }: { children: React.ReactNode }) {
   const [tf, setTf] = useState<StratoTimeframe | null>(() => {
     const now = new Date();
     return {
-      from: { absoluteDate: new Date(now.getTime() - 7 * 86_400_000).toISOString(), value: "-7d", type: "expression" },
+      from: { absoluteDate: new Date(now.getTime() - 24 * 3_600_000).toISOString(), value: "-24h", type: "expression" },
       to: { absoluteDate: now.toISOString(), value: "now()", type: "expression" },
     };
   });

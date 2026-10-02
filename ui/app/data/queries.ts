@@ -94,7 +94,7 @@ export function modelRightSizingQuery(): string {
 export function modelRightSizingDetailQuery(): string {
   return `${rightSizingPrelude()}
 | summarize {
-    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    user = takeFirst(user_display),
     dept = takeFirst(dept),
     trivialTurns = countIf(isTrivial),
     spend = sum(cost),
@@ -122,7 +122,7 @@ export function sessionsQuery(extraFilter?: string): string {
 | fieldsAdd editTool = ${TOOL_NAME_EXPR}, minuteBucket = bin(start_time, 1m)
 | summarize {
     assistant = takeFirst(assistant),
-    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    user = takeFirst(user_display),
     uid = takeFirst(uid),
     dept = takeFirst(dept),
     repo = takeFirst(github.copilot.git.repository),
@@ -151,60 +151,57 @@ export function sessionsQuery(extraFilter?: string): string {
  * These live ONLY in Claude Code's `claude_code.*` OTel metrics — never on spans/logs — so this is
  * the sole source for them. Validated against the tenant with dtctl.
  *
- * Returned in LONG form — one row per (sessionId, metric, value) — and pivoted to per-session
- * objects by outcomeMap() in ui/app/data/outcomes.ts. The long/append shape is deliberate: a single
- * multi-aggregate `timeseries { a=…, b=… }` collapses to ZERO rows if ANY aggregate has no series in
- * the window (verified: `pull_request.count` when no PR was opened, or a filter matching nothing,
- * nulls out the entire result). Emitting each metric as its own single-aggregate `timeseries` and
- * unioning them with `append` avoids that — an empty metric just contributes no rows. `arraySum`
+ * Each metric is its own single-aggregate `timeseries`, unioned with `append`, then pivoted to ONE
+ * row per session with `summarize`. The append shape is deliberate: a single multi-aggregate
+ * `timeseries { a=…, b=… }` collapses to ZERO rows if ANY aggregate has no series in the window
+ * (verified: `pull_request.count` when no PR was opened nulls out the entire result). The pivot
+ * keeps the row count at one per session — the long form returned up to six per session and
+ * blew through the row limit on multi-day timeframes, dropping whole metrics. `arraySum`
  * collapses each per-bucket timeseries array to a scalar total across the app-injected timeframe.
  *
  * If no `claude_code.*` metrics are ingested, this returns zero rows and callers fall back to the
  * span-derived signals on sessionsQuery (`edits`, `activeMin`). See docs/claude-code-telemetry.md.
  */
+const SESSION_OUTCOME_METRICS: Array<[string, string]> = [
+  ["commits", "sum(claude_code.commit.count)"],
+  ["prs", "sum(claude_code.pull_request.count)"],
+  ["activeSec", "sum(claude_code.active_time.total)"],
+  ["linesAdded", `sum(claude_code.lines_of_code.count, filter: { type == "added" })`],
+  ["linesRemoved", `sum(claude_code.lines_of_code.count, filter: { type == "removed" })`],
+  ["editsAccepted", `sum(claude_code.code_edit_tool.decision, filter: { decision == "accept" })`],
+];
+
+/** Append one single-aggregate timeseries per metric, then pivot to one row per `key`. */
+function pivotedOutcomes(groupBy: string, key: string, metrics: Array<[string, string]>, flt = ""): string {
+  const branch = ([label, agg]: [string, string]) =>
+    `timeseries v = ${agg}, by:{ \`${groupBy}\` }\n` +
+    `| fieldsAdd v = arraySum(v), metric = "${label}"\n` +
+    `| fields ${key} = \`${groupBy}\`, metric, v`;
+  const [first, ...rest] = metrics.map(branch);
+  const cols = metrics.map(([label]) => `${label} = sum(if(metric == "${label}", v, else: 0))`).join(",\n    ");
+  return (
+    first +
+    "\n" +
+    rest.map((b) => `| append [ ${b} ]`).join("\n") +
+    `\n| filter isNotNull(v) and v > 0${flt}\n| summarize {\n    ${cols}\n  }, by:{ ${key} }`
+  );
+}
+
 export function sessionOutcomesQuery(sessionId?: string): string {
-  // Wide-format single timeseries (1 row per session instead of 6) so the row
-  // limit isn't exhausted by large timeframes with many sessions.
   const scope = sessionId ? `\n| filter sessionId == "${q(sessionId)}"` : "";
-  return `timeseries {
-  commits    = sum(claude_code.commit.count),
-  prs        = sum(claude_code.pull_request.count),
-  activeSec  = sum(claude_code.active_time.total),
-  linesAdded = sum(claude_code.lines_of_code.count, filter:{ type == "added" }),
-  linesRemoved = sum(claude_code.lines_of_code.count, filter:{ type == "removed" }),
-  editsAccepted = sum(claude_code.code_edit_tool.decision, filter:{ decision == "accept" })
-}, by:{ \`session.id\` }
-| fieldsAdd sessionId = \`session.id\`,
-    commits = arraySum(commits), prs = arraySum(prs), activeSec = arraySum(activeSec),
-    linesAdded = arraySum(linesAdded), linesRemoved = arraySum(linesRemoved),
-    editsAccepted = arraySum(editsAccepted)
-| fields sessionId, commits, prs, activeSec, linesAdded, linesRemoved, editsAccepted
-| filter commits > 0 or linesAdded > 0 or prs > 0 or activeSec > 0 or editsAccepted > 0${scope}
-| limit 10000`;
+  return `${pivotedOutcomes("session.id", "sessionId", SESSION_OUTCOME_METRICS, scope)}\n| limit 20000`;
 }
 
 /**
  * Metric-backed per-user outcome totals (commits, PRs, lines changed, accepted edits).
- * Same append/long-form pattern as sessionOutcomesQuery but grouped by `user.email` so
+ * Same append + pivot pattern as sessionOutcomesQuery but grouped by `user.email` so
  * results join onto the user rows' `uid` / `email` fields. Returns zero rows when no
  * `claude_code.*` metrics are ingested; callers should gate metric-only columns with
  * outcomesAvailable().
  */
 export function userOutcomesQuery(): string {
-  return `timeseries {
-  commits    = sum(claude_code.commit.count),
-  prs        = sum(claude_code.pull_request.count),
-  linesAdded = sum(claude_code.lines_of_code.count, filter:{ type == "added" }),
-  linesRemoved = sum(claude_code.lines_of_code.count, filter:{ type == "removed" }),
-  editsAccepted = sum(claude_code.code_edit_tool.decision, filter:{ decision == "accept" })
-}, by:{ \`user.email\` }
-| fieldsAdd uid = \`user.email\`,
-    commits = arraySum(commits), prs = arraySum(prs),
-    linesAdded = arraySum(linesAdded), linesRemoved = arraySum(linesRemoved),
-    editsAccepted = arraySum(editsAccepted)
-| fields uid, commits, prs, linesAdded, linesRemoved, editsAccepted
-| filter commits > 0 or linesAdded > 0 or prs > 0 or editsAccepted > 0
-| limit 1000`;
+  const metrics = SESSION_OUTCOME_METRICS.filter(([label]) => label !== "activeSec");
+  return `${pivotedOutcomes("user.email", "uid", metrics)}\n| limit 1000`;
 }
 
 /** All spans in one session, flattened — the client rebuilds the tree from parent/id. */
@@ -297,7 +294,7 @@ export function toolSessionsQuery(tool: string): string {
 | summarize {
     calls = count(),
     failures = countIf(success == false),
-    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    user = takeFirst(user_display),
     dept = takeFirst(dept),
     lastSeen = max(start_time)
   }, by:{ sessionId = \`session.id\`, uid }
@@ -314,7 +311,7 @@ export function skillLogsQuery(): string {
     and tool_name == "Skill"
     and isNotNull(tool_input)
 | fields toolInput = tool_input, sessionId = \`session.id\`,
-    email = user.email, name = user.name, dept = user.department,
+    email = user.email, name = user.name, dept = coalesce(user.department, department),
     success = success, ts = timestamp
 | sort ts desc
 | limit 5000`;
@@ -327,7 +324,7 @@ export function skillLogsQuery(): string {
 export function usersQuery(): string {
   return `${base()}
 | summarize {
-    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    user = takeFirst(user_display),
     email = takeFirst(user.email),
     dept = takeFirst(dept),
     claudeChats = countIf(assistant == "Claude Code" and is_llm),
@@ -571,7 +568,7 @@ export function shadowAICallsQuery(): string {
   return `${base()}
 | filter is_llm and is_personal
 | summarize {
-    user = takeFirst(coalesce(user.name, user.email, "(unknown)")),
+    user = takeFirst(user_display),
     uid = takeFirst(uid),
     assistant = takeFirst(assistant),
     models = countDistinct(model),

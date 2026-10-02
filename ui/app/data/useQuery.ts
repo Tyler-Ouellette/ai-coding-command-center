@@ -7,7 +7,10 @@ import { useDql } from "@dynatrace-sdk/react-hooks";
 import { useTimeframe } from "./timeframe";
 import { useSettings } from "./settings";
 
-const FALLBACK_START = new Date(Date.now() - 7 * 86_400_000).toISOString();
+const FALLBACK_START = new Date(Date.now() - 24 * 3_600_000).toISOString();
+// The API's default result cap (1000) silently truncates queries that declare a
+// larger `| limit`; raise it so each query's own limit is the effective cap.
+const MAX_RESULT_RECORDS = 20000;
 
 export function useTimeframedDql(
   query: string,
@@ -30,6 +33,7 @@ export function useTimeframedDql(
       query,
       defaultTimeframeStart: start,
       defaultTimeframeEnd: end,
+      maxResultRecords: MAX_RESULT_RECORDS,
     },
     options,
   );

@@ -25,7 +25,9 @@ const COST_EXPR = `if(contains(model,"opus"), toDouble(fresh)*15.0/1000000 + toD
     else: 0.0)))`;
 
 // The normalization prelude. Produces, on every span:
-//   assistant, is_llm, is_tool, is_interaction, is_blocked,
+//   assistant, is_llm, is_tool, is_interaction,
+//   is_blocked (a real wait on the user: Claude Code emits blocked_on_user for
+//     every tool call, but auto-approved ones resolve in ~10ms),
 //   inp/outp/cr/cc (token counts), model, is_personal, dept, fresh, cost
 // Rebuilt per call so the configurable corporate-domain predicate stays current.
 function normalizePrelude(): string {
@@ -34,15 +36,19 @@ function normalizePrelude(): string {
     is_llm = (gen_ai.operation.name=="chat" or span.name=="claude_code.llm_request" or span.name=="claude-code.llm_request"),
     is_tool = (gen_ai.operation.name=="execute_tool" or span.name=="claude_code.tool" or matchesValue(span.name, "claude-code.tool.*") and not in(span.name, array("claude-code.tool.blocked_on_user", "claude-code.tool.execution"))),
     is_interaction = (span.name=="claude_code.interaction" or span.name=="claude-code.interaction"),
-    is_blocked = (span.name=="claude_code.tool.blocked_on_user" or span.name=="claude-code.tool.blocked_on_user"),
+    is_blocked = (span.name=="claude_code.tool.blocked_on_user" or span.name=="claude-code.tool.blocked_on_user") and duration > 1s,
     inp = coalesce(gen_ai.usage.input_tokens, input_tokens, 0),
     outp = coalesce(gen_ai.usage.output_tokens, output_tokens, 0),
     cr = coalesce(gen_ai.usage.cache_read.input_tokens, cache_read_tokens, 0),
     cc = coalesce(gen_ai.usage.cache_creation.input_tokens, cache_creation_tokens, 0),
     model = coalesce(gen_ai.request.model, model, ""),
     is_personal = ${personalEmailPredicateDQL()}
-| fieldsAdd dept = if(is_personal, "Personal Account", else: coalesce(user.department, "Unmapped / Pilot")),
+| fieldsAdd emailLocal = substring(user.email, from:0, to:indexOf(user.email, "@"))
+| fieldsAdd dept = if(is_personal, "Personal Account", else: coalesce(user.department, department, "Unmapped / Pilot")),
     uid = coalesce(user.email, user.name, "(unknown)"),
+    user_display = coalesce(user.name,
+      arrayToString(iCollectArray(concat(upper(substring(splitString(emailLocal, ".")[], from:0, to:1)), substring(splitString(emailLocal, ".")[], from:1))), delimiter:" "),
+      user.email, "(unknown)"),
     fresh = if(service.name=="copilot-chat", if(toLong(inp)-toLong(cr)-toLong(cc)<0, 0, else: toLong(inp)-toLong(cr)-toLong(cc)), else: toLong(inp))
 | fieldsAdd cost = ${COST_EXPR}`;
 }
