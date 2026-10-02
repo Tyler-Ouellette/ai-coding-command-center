@@ -22,20 +22,21 @@ export function outcomesAvailable(result: DqlResultLike): boolean {
   return !result.error && (result.data?.records?.length ?? 0) > 0;
 }
 
-/** sessionId -> outcome totals, pivoted from sessionOutcomesQuery's long-form
- *  (sessionId, metric, value) rows. Metric labels match the SessionOutcome keys. */
+/** sessionId -> outcome totals, read from sessionOutcomesQuery's wide-format rows
+ *  (one row per session with all metric columns). */
 export function outcomeMap(result: DqlResultLike): Map<string, SessionOutcome> {
   const map = new Map<string, SessionOutcome>();
-  const blank = (): SessionOutcome => ({
-    commits: 0, prs: 0, linesAdded: 0, linesRemoved: 0, editsAccepted: 0, activeSec: 0,
-  });
   for (const r of result.data?.records ?? []) {
     const id = String(r.sessionId ?? "");
-    const metric = String(r.metric ?? "");
-    if (!id || !metric) continue;
-    const o = map.get(id) ?? blank();
-    if (metric in o) (o as unknown as Record<string, number>)[metric] = num(r.v);
-    map.set(id, o);
+    if (!id) continue;
+    map.set(id, {
+      commits: num(r.commits),
+      prs: num(r.prs),
+      linesAdded: num(r.linesAdded),
+      linesRemoved: num(r.linesRemoved),
+      editsAccepted: num(r.editsAccepted),
+      activeSec: num(r.activeSec),
+    });
   }
   return map;
 }
@@ -69,17 +70,19 @@ export interface UserOutcome {
   editsAccepted: number;
 }
 
-/** uid -> per-user outcome totals, pivoted from userOutcomesQuery's long-form rows. */
+/** uid -> per-user outcome totals, read from userOutcomesQuery's wide-format rows. */
 export function userOutcomeMap(result: DqlResultLike): Map<string, UserOutcome> {
   const map = new Map<string, UserOutcome>();
-  const blank = (): UserOutcome => ({ commits: 0, prs: 0, linesAdded: 0, linesRemoved: 0, editsAccepted: 0 });
   for (const r of result.data?.records ?? []) {
     const id = String(r.uid ?? "");
-    const metric = String(r.metric ?? "");
-    if (!id || !metric) continue;
-    const o = map.get(id) ?? blank();
-    if (metric in o) (o as unknown as Record<string, number>)[metric] = num(r.v);
-    map.set(id, o);
+    if (!id) continue;
+    map.set(id, {
+      commits: num(r.commits),
+      prs: num(r.prs),
+      linesAdded: num(r.linesAdded),
+      linesRemoved: num(r.linesRemoved),
+      editsAccepted: num(r.editsAccepted),
+    });
   }
   return map;
 }

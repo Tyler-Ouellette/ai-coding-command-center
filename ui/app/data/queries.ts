@@ -163,28 +163,24 @@ export function sessionsQuery(extraFilter?: string): string {
  * span-derived signals on sessionsQuery (`edits`, `activeMin`). See docs/claude-code-telemetry.md.
  */
 export function sessionOutcomesQuery(sessionId?: string): string {
-  const branch = (label: string, agg: string) =>
-    `timeseries v = ${agg}, by:{ \`session.id\` }\n` +
-    `| fieldsAdd v = arraySum(v), metric = "${label}"\n` +
-    `| fields sessionId = \`session.id\`, metric, v`;
-  const branches = [
-    branch("commits", "sum(claude_code.commit.count)"),
-    branch("prs", "sum(claude_code.pull_request.count)"),
-    branch("activeSec", "sum(claude_code.active_time.total)"),
-    branch("linesAdded", `sum(claude_code.lines_of_code.count, filter: { type == "added" })`),
-    branch("linesRemoved", `sum(claude_code.lines_of_code.count, filter: { type == "removed" })`),
-    branch("editsAccepted", `sum(claude_code.code_edit_tool.decision, filter: { decision == "accept" })`),
-  ];
+  // Wide-format single timeseries (1 row per session instead of 6) so the row
+  // limit isn't exhausted by large timeframes with many sessions.
   const scope = sessionId ? `\n| filter sessionId == "${q(sessionId)}"` : "";
-  return (
-    branches[0] +
-    "\n" +
-    branches
-      .slice(1)
-      .map((b) => `| append [ ${b} ]`)
-      .join("\n") +
-    `\n| filter isNotNull(v) and v > 0${scope}\n| limit 6000`
-  );
+  return `timeseries {
+  commits    = sum(claude_code.commit.count),
+  prs        = sum(claude_code.pull_request.count),
+  activeSec  = sum(claude_code.active_time.total),
+  linesAdded = sum(claude_code.lines_of_code.count, filter:{ type == "added" }),
+  linesRemoved = sum(claude_code.lines_of_code.count, filter:{ type == "removed" }),
+  editsAccepted = sum(claude_code.code_edit_tool.decision, filter:{ decision == "accept" })
+}, by:{ \`session.id\` }
+| fieldsAdd sessionId = \`session.id\`,
+    commits = arraySum(commits), prs = arraySum(prs), activeSec = arraySum(activeSec),
+    linesAdded = arraySum(linesAdded), linesRemoved = arraySum(linesRemoved),
+    editsAccepted = arraySum(editsAccepted)
+| fields sessionId, commits, prs, activeSec, linesAdded, linesRemoved, editsAccepted
+| filter commits > 0 or linesAdded > 0 or prs > 0 or activeSec > 0 or editsAccepted > 0${scope}
+| limit 10000`;
 }
 
 /**
@@ -195,26 +191,20 @@ export function sessionOutcomesQuery(sessionId?: string): string {
  * outcomesAvailable().
  */
 export function userOutcomesQuery(): string {
-  const branch = (label: string, agg: string) =>
-    `timeseries v = ${agg}, by:{ \`user.email\` }\n` +
-    `| fieldsAdd v = arraySum(v), metric = "${label}"\n` +
-    `| fields uid = \`user.email\`, metric, v`;
-  const branches = [
-    branch("commits", "sum(claude_code.commit.count)"),
-    branch("prs", "sum(claude_code.pull_request.count)"),
-    branch("linesAdded", `sum(claude_code.lines_of_code.count, filter: { type == "added" })`),
-    branch("linesRemoved", `sum(claude_code.lines_of_code.count, filter: { type == "removed" })`),
-    branch("editsAccepted", `sum(claude_code.code_edit_tool.decision, filter: { decision == "accept" })`),
-  ];
-  return (
-    branches[0] +
-    "\n" +
-    branches
-      .slice(1)
-      .map((b) => `| append [ ${b} ]`)
-      .join("\n") +
-    `\n| filter isNotNull(v) and v > 0\n| limit 3000`
-  );
+  return `timeseries {
+  commits    = sum(claude_code.commit.count),
+  prs        = sum(claude_code.pull_request.count),
+  linesAdded = sum(claude_code.lines_of_code.count, filter:{ type == "added" }),
+  linesRemoved = sum(claude_code.lines_of_code.count, filter:{ type == "removed" }),
+  editsAccepted = sum(claude_code.code_edit_tool.decision, filter:{ decision == "accept" })
+}, by:{ \`user.email\` }
+| fieldsAdd uid = \`user.email\`,
+    commits = arraySum(commits), prs = arraySum(prs),
+    linesAdded = arraySum(linesAdded), linesRemoved = arraySum(linesRemoved),
+    editsAccepted = arraySum(editsAccepted)
+| fields uid, commits, prs, linesAdded, linesRemoved, editsAccepted
+| filter commits > 0 or linesAdded > 0 or prs > 0 or editsAccepted > 0
+| limit 1000`;
 }
 
 /** All spans in one session, flattened — the client rebuilds the tree from parent/id. */
